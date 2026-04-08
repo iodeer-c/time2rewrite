@@ -1,11 +1,136 @@
-# Test your FastAPI endpoints
+# Time Query Service examples
 
 GET http://127.0.0.1:8000/
 Accept: application/json
 
 ###
 
-GET http://127.0.0.1:8000/hello/User
+POST http://127.0.0.1:8000/query/parse
 Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "今年3月和去年同期相比利润怎么样",
+  "system_date": "2026-04-07",
+  "timezone": "Asia/Shanghai"
+}
 
 ###
+
+POST http://127.0.0.1:8000/query/resolve
+Accept: application/json
+Content-Type: application/json
+
+{
+  "system_date": "2026-04-07",
+  "timezone": "Asia/Shanghai",
+  "parsed_time_expressions": {
+    "time_expressions": [
+      {
+        "id": "t1",
+        "text": "今年3月",
+        "expr": {
+          "op": "select_month",
+          "month": 3,
+          "base": {
+            "op": "current_period",
+            "unit": "year"
+          }
+        }
+      },
+      {
+        "id": "t2",
+        "text": "去年同期",
+        "expr": {
+          "op": "shift",
+          "unit": "year",
+          "value": -1,
+          "base": {
+            "op": "reference",
+            "ref": "t1"
+          }
+        }
+      }
+    ]
+  }
+}
+
+###
+
+POST http://127.0.0.1:8000/query/rewrite
+Accept: application/json
+Content-Type: application/json
+
+{
+  "original_query": "今年3月和去年同期相比利润怎么样",
+  "resolved_time_expressions": {
+    "resolved_time_expressions": [
+      {
+        "id": "t1",
+        "text": "今年3月",
+        "start_time": "2026-03-01 00:00:00",
+        "end_time": "2026-03-31 23:59:59",
+        "timezone": "Asia/Shanghai"
+      },
+      {
+        "id": "t2",
+        "text": "去年同期",
+        "start_time": "2025-03-01 00:00:00",
+        "end_time": "2025-03-31 23:59:59",
+        "timezone": "Asia/Shanghai"
+      }
+    ]
+  }
+}
+
+###
+
+POST http://127.0.0.1:8000/query/pipeline
+Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "今年3月和去年同期相比利润怎么样",
+  "system_date": "2026-04-07",
+  "timezone": "Asia/Shanghai",
+  "rewrite": true
+}
+
+###
+
+POST http://127.0.0.1:8000/query/pipeline
+Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "上个月的前两周的销售额分别是多少",
+  "system_date": "2026-04-07",
+  "timezone": "Asia/Shanghai",
+  "rewrite": true
+}
+
+###
+
+POST http://127.0.0.1:8000/query/pipeline
+Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "这个月第二个周二的销售额是多少",
+  "system_date": "2026-09-10",
+  "timezone": "Asia/Shanghai",
+  "rewrite": true
+}
+
+###
+
+POST http://127.0.0.1:8000/query/pipeline
+Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "这个月第二周的周二的销售额是多少",
+  "system_date": "2026-09-10",
+  "timezone": "Asia/Shanghai",
+  "rewrite": true
+}
