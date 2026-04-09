@@ -443,6 +443,7 @@ def eval_expr(
     context: Mapping[str, TimeRange] | None = None,
     business_calendar: BusinessCalendarPort | None = None,
     calendar_versions: set[str] | None = None,
+    rolling_anchor_dt: datetime | None = None,
 ) -> TimeRange:
     payload = _normalize_expr(expr)
     op = payload["op"]
@@ -460,11 +461,12 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return shift_range(base, payload["unit"], payload["value"])
 
     if op == "rolling":
-        return rolling_range(system_dt, payload["unit"], payload["value"])
+        return rolling_range(rolling_anchor_dt or system_dt, payload["unit"], payload["value"])
 
     if op == "calendar_event_range":
         if business_calendar is None:
@@ -497,6 +499,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return range_edge(base, payload["edge"])
 
@@ -509,6 +512,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return business_day_offset_range(
             base=base,
@@ -527,6 +531,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
 
     if op == "enumerate_makeup_workdays":
@@ -539,6 +544,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return slice_subperiods_range(base, payload["mode"], payload["unit"], payload["count"])
 
@@ -549,6 +555,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return select_subperiod_range(base, payload["unit"], payload["index"])
 
@@ -559,6 +566,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         _require_week_base(base, "select_weekday")
         target = base.start + timedelta(days=payload["weekday"] - 1)
@@ -571,6 +579,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         _require_week_base(base, "select_weekend")
         start = start_of_day(base.start + timedelta(days=5))
@@ -584,6 +593,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return select_occurrence_range(
             base,
@@ -599,6 +609,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         month = payload["month"]
         year = base.start.year
@@ -611,6 +622,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         quarter = payload["quarter"]
         year = base.start.year
@@ -623,6 +635,7 @@ def eval_expr(
             context,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         return _natural_half_year_range(base.start.year, payload["half"], base.start.tzinfo)
 
@@ -707,6 +720,7 @@ def resolve_query(
 ) -> dict[str, Any]:
     parsed = ParsedTimeExpressions.model_validate(parsed_time_expressions)
     system_dt = datetime.strptime(system_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone))
+    rolling_anchor_dt = system_dt if parsed.rolling_includes_today else system_dt - timedelta(days=1)
     if business_calendar is None:
         needs_business_calendar = any(_expr_uses_business_calendar(item.expr) for item in parsed.time_expressions)
         if needs_business_calendar:
@@ -726,6 +740,7 @@ def resolve_query(
                 resolved_map,
                 business_calendar=business_calendar,
                 calendar_versions=calendar_versions,
+                rolling_anchor_dt=rolling_anchor_dt,
             )
             resolved_map[item.id] = base
             matched_dates = _filter_calendar_dates(
@@ -791,6 +806,7 @@ def resolve_query(
             resolved_map,
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
         )
         resolved_map[item.id] = resolved
         resolved_items.append(

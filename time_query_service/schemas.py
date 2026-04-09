@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 
 class StrictModel(BaseModel):
@@ -196,6 +196,7 @@ class TimeExpression(StrictModel):
 
 
 class ParsedTimeExpressions(StrictModel):
+    rolling_includes_today: StrictBool = False
     time_expressions: list[TimeExpression] = Field(default_factory=list)
 
     @model_validator(mode="after")

@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
 from time_query_service.config import get_llm_config
 from time_query_service.schemas import ParsedTimeExpressions
@@ -16,6 +17,7 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 
 你的输出必须严格符合这个结构：
 {
+  "rolling_includes_today": false,
   "time_expressions": [
     {
       "id": "t1",
@@ -43,6 +45,7 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 3. 如果没有识别到时间字段，输出 {"time_expressions": []}
 
 字段定义：
+- rolling_includes_today: 顶层布尔字段，可省略；仅用于控制 rolling 是否包含 system_date 当日。省略等价于 false
 - time_expressions: 数组，包含 0 个或多个时间字段对象
 - id: 时间字段唯一标识，使用 t1、t2、t3 这种格式，并按输出顺序递增
 - text: 时间字段文本，可为原文时间短语，也可为规范化后的子时间字段名称
@@ -89,6 +92,11 @@ expr 只允许以下 op：
 - unit: 允许 day/week/month/quarter/half_year/year
 - value: 正整数
 - anchor: 只允许 "system_date"
+
+rolling_includes_today 顶层规则：
+- 仅当用户明确要求 rolling 类窗口“含今天 / 含今日 / 截至今天 / 至今 / 算到今天 / 最近一周含今天”时，才输出 "rolling_includes_today": true
+- 对“本月收益 / 本周收益 / 本年收益 / 今年3月 / 上个月 / 这个月第二个周二 / 本月第二周”这类非 rolling 表达，不得因为句子里出现“今天”就输出 true
+- 如果问题里既有“今天”单日又有 rolling，除非用户明确要求 rolling 含今天，否则 rolling_includes_today 仍应为 false
 
 5. calendar_event_range
 - op = "calendar_event_range"
@@ -694,6 +702,28 @@ week 作为子周期时，统一使用下面的编号规则：
 }
 """
 
+ROLLING_FLAG_VALIDATOR_SYSTEM_PROMPT = """你是一个严格的布尔校验器。你的任务只是在已有解析结果基础上判断 rolling_includes_today 应该是 true 还是 false。
+
+你只能输出一个 JSON 对象，结构必须严格如下：
+{
+  "rolling_includes_today": false
+}
+
+规则：
+1. 你只能判断顶层 rolling_includes_today，不能修改 time_expressions，不能新增字段，不能解释
+2. 只有当用户明确要求 rolling 类窗口“含今天 / 含今日 / 截至今天 / 到今天 / 至今 / 算到今天”时，rolling_includes_today 才能是 true
+3. 仅仅出现“今天”这个词，不等于 rolling 必须含今天
+4. 如果句子里同时有“今天”单日和 rolling，除非用户明确要求 rolling 含今天，否则必须返回 false
+5. 如果第一轮解析里没有 rolling 节点，也必须返回 false
+
+示例：
+- “最近一周收益” -> {"rolling_includes_today": false}
+- “最近一周收益，含今天” -> {"rolling_includes_today": true}
+- “最近一周收益，截至昨天” -> {"rolling_includes_today": false}
+- “本月收益” -> {"rolling_includes_today": false}
+- “今天和最近一周对比” -> {"rolling_includes_today": false}
+"""
+
 
 def build_parser_user_prompt(query: str, system_date: str, timezone: str) -> str:
     return (
@@ -715,6 +745,28 @@ def build_parser_repair_prompt(raw_output: str) -> str:
         "原始输出：\n"
         f"{raw_output}"
     )
+
+
+def build_rolling_flag_validator_prompt(
+    query: str,
+    system_date: str,
+    timezone: str,
+    first_pass_payload: dict[str, Any],
+) -> str:
+    return (
+        "请只判断 rolling_includes_today 应该是 true 还是 false，并输出严格 JSON。\n\n"
+        f"system_date: {system_date}\n"
+        f"timezone: {timezone}\n"
+        f"user_query: {query}\n"
+        "first_pass_parse_json:\n"
+        f"{json.dumps(first_pass_payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+class _RollingFlagDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rolling_includes_today: StrictBool
 
 
 class QueryParser:
@@ -770,11 +822,52 @@ class QueryParser:
             except ValueError as exc:
                 raise ValueError("LLM returned invalid JSON after repair attempt.") from exc
 
-        return ParsedTimeExpressions.model_validate(payload)
+        parsed = ParsedTimeExpressions.model_validate(payload)
+        if not self._parsed_contains_rolling(parsed):
+            return parsed
+
+        validated_flag = self._validate_rolling_includes_today(
+            query=query,
+            system_date=system_date,
+            timezone=timezone,
+            first_pass_payload=payload,
+            fallback_value=parsed.rolling_includes_today,
+        )
+        merged_payload = dict(payload)
+        merged_payload["rolling_includes_today"] = validated_flag
+        return ParsedTimeExpressions.model_validate(merged_payload)
 
     def _invoke_text(self, messages: list[Any]) -> str:
         result = self._get_text_runner().invoke(messages)
         return self._coerce_text(result)
+
+    def _validate_rolling_includes_today(
+        self,
+        *,
+        query: str,
+        system_date: str,
+        timezone: str,
+        first_pass_payload: dict[str, Any],
+        fallback_value: bool,
+    ) -> bool:
+        messages = [
+            SystemMessage(content=ROLLING_FLAG_VALIDATOR_SYSTEM_PROMPT),
+            HumanMessage(
+                content=build_rolling_flag_validator_prompt(
+                    query=query,
+                    system_date=system_date,
+                    timezone=timezone,
+                    first_pass_payload=first_pass_payload,
+                )
+            ),
+        ]
+        try:
+            raw_text = self._invoke_text(messages)
+            payload = self._parse_json_payload(raw_text)
+            decision = _RollingFlagDecision.model_validate(payload)
+        except (ValueError, ValidationError):
+            return fallback_value
+        return decision.rolling_includes_today
 
     @staticmethod
     def _coerce_text(result: Any) -> str:
@@ -794,6 +887,23 @@ class QueryParser:
             if text_parts:
                 return "".join(text_parts)
         return str(result)
+
+    @classmethod
+    def _parsed_contains_rolling(cls, parsed: ParsedTimeExpressions) -> bool:
+        return any(cls._expr_contains_rolling(item.expr) for item in parsed.time_expressions)
+
+    @classmethod
+    def _expr_contains_rolling(cls, expr: Any) -> bool:
+        if getattr(expr, "op", None) == "rolling":
+            return True
+
+        for value in vars(expr).values():
+            if isinstance(value, list):
+                if any(cls._expr_contains_rolling(item) for item in value if hasattr(item, "op")):
+                    return True
+            elif hasattr(value, "op") and cls._expr_contains_rolling(value):
+                return True
+        return False
 
     @classmethod
     def _parse_json_payload(cls, raw_text: str) -> dict[str, Any]:

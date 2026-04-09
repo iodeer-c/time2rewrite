@@ -32,6 +32,11 @@
 - 节假日区间：支持 `calendar_event_range`，可解析“去年国庆假期”这类命名节假日范围
 - 业务日偏移：支持 `range_edge + business_day_offset`，可解析“节前最后一个工作日”这类表达
 
+## 相关文档
+
+- 当前实现现状：`docs/time_processing_current_state.md`
+- 调用与使用说明：`docs/time_processing_usage_guide.md`
+
 ## 环境要求
 
 - Python 3.11
@@ -110,6 +115,7 @@ curl -X POST http://127.0.0.1:8000/query/parse \
 
 ```json
 {
+  "rolling_includes_today": false,
   "time_expressions": [
     {
       "id": "t1",
@@ -149,6 +155,7 @@ curl -X POST http://127.0.0.1:8000/query/resolve \
     "system_date": "2026-04-07",
     "timezone": "Asia/Shanghai",
     "parsed_time_expressions": {
+      "rolling_includes_today": false,
       "time_expressions": [
         {
           "id": "t1",
@@ -249,6 +256,12 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 - `parsed_time_expressions`
 - `resolved_time_expressions`
 - `rewritten_query`
+
+补充说明：
+
+- `rolling` 类时间窗口默认以 `system_date - 1` 为右端锚点，也就是默认**不含当天**。
+- 如果要保持旧的“含当天”行为，需要在解析结果里显式设置 `"rolling_includes_today": true`。
+- `POST /query/parse` 和 `POST /query/pipeline` 返回的 `parsed_time_expressions` 会显式包含 `rolling_includes_today`，即使模型原始 JSON 省略了该字段。
 
 ### 5. 子周期切片示例
 
