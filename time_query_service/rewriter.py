@@ -30,6 +30,7 @@ REWRITER_SYSTEM_PROMPT = """你是一个查询改写器。
 - 当输入中已有多个时间字段时，优先使用“分别”“各自”等能明确表达多窗口结果的说法
 - 多个时间字段可能来自同一个原文时间短语拆分后的规范化字段，也必须按输入顺序分别改写
 - 不要新增输入中不存在的时间信息
+- 如果原问题没有显式时间，但输入给了 1 个默认补出的单时间窗口，可以直接把该日期补进问题里，让结果变成自然问句
 
 示例1
 原问题：上周二的日期是多少
@@ -105,6 +106,26 @@ resolved_time_expressions:
 - end_time: 2026-01-31 23:59:59
 - timezone: Asia/Shanghai
 输出：2026年1月31日的销售额是多少
+
+示例7
+原问题：帮我看看数据
+resolved_time_expressions:
+- id: t1
+- text: 昨天
+- start_time: 2026-04-05 00:00:00
+- end_time: 2026-04-05 23:59:59
+- timezone: Asia/Shanghai
+输出：帮我看看2026年4月5日的数据
+
+示例8
+原问题：收益是多少
+resolved_time_expressions:
+- id: t1
+- text: 昨天
+- start_time: 2026-04-05 00:00:00
+- end_time: 2026-04-05 23:59:59
+- timezone: Asia/Shanghai
+输出：2026年4月5日的收益是多少
 """
 
 

@@ -262,6 +262,23 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 - `rolling` 类时间窗口默认以 `system_date - 1` 为右端锚点，也就是默认**不含当天**。
 - 如果要保持旧的“含当天”行为，需要在解析结果里显式设置 `"rolling_includes_today": true`。
 - `POST /query/parse` 和 `POST /query/pipeline` 返回的 `parsed_time_expressions` 会显式包含 `rolling_includes_today`，即使模型原始 JSON 省略了该字段。
+- 如果问题里完全没有时间信息，`POST /query/parse` 和 `POST /query/pipeline` 会默认补一个“昨天”的单日时间字段。
+- 这个默认“昨天”只影响 parser 驱动的链路；直接调用 `POST /query/rewrite` 且传入空 `resolved_time_expressions` 时，仍会直接返回原问题。
+
+无时间示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/query/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "帮我看看数据",
+    "system_date": "2026-04-06",
+    "timezone": "Asia/Shanghai",
+    "rewrite": true
+  }'
+```
+
+这类请求会先补成“昨天”，即 `2026-04-05 00:00:00 ~ 2026-04-05 23:59:59`，`rewritten_query` 可能改写为 `帮我看看2026年4月5日的数据`。
 
 ### 5. 子周期切片示例
 

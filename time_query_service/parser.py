@@ -42,7 +42,7 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 解析目标：
 1. 识别回答当前问题所需的全部时间字段
 2. 为每个时间字段生成一个 id、text 和 expr
-3. 如果没有识别到时间字段，输出 {"time_expressions": []}
+3. 如果没有识别到时间字段，且用户问题里没有任何时间信息，默认补一个“昨天”的单日时间字段，不要输出空数组
 
 字段定义：
 - rolling_includes_today: 顶层布尔字段，可省略；仅用于控制 rolling 是否包含 system_date 当日。省略等价于 false
@@ -250,6 +250,25 @@ week 作为子周期时，统一使用下面的编号规则：
 - ref: string，引用前面已经出现过的时间字段 id，例如 t1
 
 规则：
+- 如果用户问题里没有任何时间信息，默认输出 1 个时间字段，表示“昨天”：
+  {
+    "rolling_includes_today": false,
+    "time_expressions": [
+      {
+        "id": "t1",
+        "text": "昨天",
+        "expr": {
+          "op": "shift",
+          "unit": "day",
+          "value": -1,
+          "base": {
+            "op": "current_period",
+            "unit": "day"
+          }
+        }
+      }
+    ]
+  }
 - 不允许发明新的字段
 - 不允许发明新的 op
 - 一个问题中可能只出现一个原文时间短语，但为了回答问题，可能需要输出多个 time_expression
@@ -277,6 +296,7 @@ week 作为子周期时，统一使用下面的编号规则：
 - “工作日” 对应 day_kind="workday"
 - “休息日” 对应 day_kind="restday"
 - “节假日” 对应 day_kind="holiday"
+- “本年收益是多少”“本月收益是多少”“今年3月收益是多少”这类问题已经有明确时间，绝不能退化成默认“昨天”
 
 输出要求：
 - 只输出 JSON
@@ -822,7 +842,7 @@ class QueryParser:
             except ValueError as exc:
                 raise ValueError("LLM returned invalid JSON after repair attempt.") from exc
 
-        parsed = ParsedTimeExpressions.model_validate(payload)
+        parsed = self._normalize_no_time_parse(ParsedTimeExpressions.model_validate(payload))
         if not self._parsed_contains_rolling(parsed):
             return parsed
 
@@ -836,6 +856,29 @@ class QueryParser:
         merged_payload = dict(payload)
         merged_payload["rolling_includes_today"] = validated_flag
         return ParsedTimeExpressions.model_validate(merged_payload)
+
+    @staticmethod
+    def _normalize_no_time_parse(parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
+        if parsed.time_expressions:
+            return parsed
+
+        return ParsedTimeExpressions.model_validate(
+            {
+                "rolling_includes_today": False,
+                "time_expressions": [
+                    {
+                        "id": "t1",
+                        "text": "昨天",
+                        "expr": {
+                            "op": "shift",
+                            "unit": "day",
+                            "value": -1,
+                            "base": {"op": "current_period", "unit": "day"},
+                        },
+                    }
+                ],
+            }
+        )
 
     def _invoke_text(self, messages: list[Any]) -> str:
         result = self._get_text_runner().invoke(messages)
