@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.parser import QueryParser
 from time_query_service.rewriter import QueryRewriter
 from time_query_service.schemas import ParsedTimeExpressions
@@ -9,9 +10,16 @@ from time_query_service.time_resolver import resolve_query
 
 
 class QueryPipelineService:
-    def __init__(self, *, parser: Any | None = None, rewriter: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        parser: Any | None = None,
+        rewriter: Any | None = None,
+        business_calendar: BusinessCalendarPort | None = None,
+    ) -> None:
         self._parser = parser
         self._rewriter = rewriter
+        self._business_calendar = business_calendar
 
     @property
     def parser(self) -> Any:
@@ -34,6 +42,7 @@ class QueryPipelineService:
             parsed_time_expressions=parsed_time_expressions,
             system_date=system_date,
             timezone=timezone,
+            business_calendar=self._business_calendar,
         )
 
     def rewrite_query(self, *, original_query: str, resolved_time_expressions: dict[str, Any]) -> str:

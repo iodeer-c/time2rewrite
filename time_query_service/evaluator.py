@@ -174,7 +174,7 @@ def run_testset(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the time query pipeline against a CSV test set.")
     parser.add_argument("input_csv",
-                        default="/Users/td/PycharmProjects/time2rewirte/time_query_testset_30.csv",
+                        default="/Users/td/PycharmProjects/time2rewirte/calendar_qa_2025_2026.csv",
                         help="Path to the input CSV test set.")
     parser.add_argument(
         "--output-dir",
@@ -206,5 +206,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# python -m time_query_service.evaluator /Users/td/PycharmProjects/time2rewirte/time_query_testset_30.csv
+# time_query_business_calendar_2025_2026_corrected.csv
+# python -m time_query_service.evaluator /Users/td/PycharmProjects/time2rewirte/time_query_business_calendar_2025_2026_corrected.csv

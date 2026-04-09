@@ -29,6 +29,8 @@
 - 依赖表达：支持“去年同期”等引用前面时间表达的场景
 - 子周期切片：支持“上个月前两周”“去年的前两个季度”这类大范围内部切片
 - 子周期选择：支持“上个月第一周”“今年第一周”“第一个季度的第一周”这类在大周期里选第 N 个小周期
+- 节假日区间：支持 `calendar_event_range`，可解析“去年国庆假期”这类命名节假日范围
+- 业务日偏移：支持 `range_edge + business_day_offset`，可解析“节前最后一个工作日”这类表达
 
 ## 环境要求
 
@@ -50,6 +52,7 @@ cp .env.example .env
 DASHSCOPE_API_KEY=your-dashscope-api-key
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL_NAME=qwen3.6-plus
+BUSINESS_CALENDAR_ROOT=config/business_calendar
 ```
 
 如果还没有虚拟环境：
@@ -293,6 +296,21 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 这类表达会解析为 `select_occurrence`，表示“父周期内第 N 次出现的 weekday/weekend”。例如 `2026-09` 的“第二个周二”是 `2026-09-08`。
 
 如果问题是“这个月第二周的周二”，则会先用 `select_subperiod(unit="week", index=2, ...)` 取“第二周”，再用 `select_weekday` 取该周的周二。在 `2026-09` 里，它对应的是 `2026-09-15`。这两种说法语义不同，resolver 不会再混用。
+
+### 8. 节假日与业务日示例
+
+```bash
+curl -X POST http://127.0.0.1:8000/query/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "去年国庆假期前最后一个工作日是哪天",
+    "system_date": "2026-04-07",
+    "timezone": "Asia/Shanghai",
+    "rewrite": true
+  }'
+```
+
+这类表达会先解析 `去年国庆假期` 的命名节假日区间，再通过 `range_edge(start)` 取假期开始日，最后用 `business_day_offset` 向前找到最近工作日。项目默认提供了 `config/business_calendar/CN/2025.json` 这份 demo 数据，可用于本地验证国庆相关示例。
 
 ## 实现说明
 

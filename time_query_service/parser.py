@@ -53,6 +53,11 @@ expr 只允许以下 op：
 - current_period
 - shift
 - rolling
+- calendar_event_range
+- range_edge
+- business_day_offset
+- enumerate_calendar_days
+- enumerate_makeup_workdays
 - slice_subperiods
 - select_subperiod
 - select_weekday
@@ -85,7 +90,71 @@ expr 只允许以下 op：
 - value: 正整数
 - anchor: 只允许 "system_date"
 
-5. slice_subperiods
+5. calendar_event_range
+- op = "calendar_event_range"
+- region: 字符串，默认使用 "CN"
+- event_key: 节日键，必须与业务日日历数据一致。常见值包括：
+  - new_year
+  - spring_festival
+  - qingming
+  - labor_day
+  - dragon_boat
+  - mid_autumn
+  - national_day
+- year: 公历年整数
+- scope: 只允许 "consecutive_rest" 或 "statutory"
+
+语义：
+- 直接表示某个命名节假日区间
+- 例如“去年国庆假期”“今年中秋法定假期”
+- 不允许自己编造具体公历日期，必须通过 event_key + year + scope 表达
+
+6. range_edge
+- op = "range_edge"
+- edge: 只允许 "start" 或 "end"
+- base: 一个 expr 对象
+
+语义：
+- 取某个时间区间的开始日或结束日，并返回单日范围
+- 例如“国庆假期开始日”“国庆假期结束日”
+
+7. business_day_offset
+- op = "business_day_offset"
+- region: 字符串，默认使用 "CN"
+- value: 非 0 整数
+- base: 一个 expr 对象，且结果必须是单日范围
+
+语义：
+- 从 base 这个单日出发，按业务日历向前或向后寻找第 N 个工作日
+- 例如“节前最后一个工作日”“节后第一个工作日”
+- 不要把这类表达解析成自然日 rolling 或普通 shift
+
+8. enumerate_calendar_days
+- op = "enumerate_calendar_days"
+- region: 字符串，默认使用 "CN"
+- day_kind: 只允许 "workday"、"restday"、"holiday"
+- base: 一个 expr 对象
+
+语义：
+- 先求值 base 为一个连续时间区间
+- 再在 base 内部按业务日历枚举命中的日期
+- workday 表示工作日
+- restday 表示休息日，包含周末和法定休息日
+- holiday 表示命名节假日日期，只统计业务日日历中 event spans 覆盖到的日期
+- 例如“2025年10月份的工作日均值收益是多少”“2025年10月份的节假日均值收益是多少”
+
+8.1 enumerate_makeup_workdays
+- op = "enumerate_makeup_workdays"
+- region: 字符串，默认使用 "CN"
+- event_key: 节日键，必须与业务日日历数据一致
+- year: 公历年整数
+
+语义：
+- 直接按业务日历枚举某个命名节假日在该公历年关联的调休补班日
+- 不需要 base，不要先构造连续连休区间
+- 例如“2025年春节调休补班是哪些日期”“2025年中秋调休上班日是哪些日期”
+
+9. slice_subperiods
 - op = "slice_subperiods"
 - mode: 只允许 "first" 或 "last"
 - unit: 只允许 day/week/month/quarter
@@ -98,7 +167,7 @@ expr 只允许以下 op：
 - mode=first 表示取前 count 个子周期
 - mode=last 表示取后 count 个子周期
 
-6. select_subperiod
+10. select_subperiod
 - op = "select_subperiod"
 - unit: 只允许 day/week/month/quarter/half_year
 - index: 正整数，从 1 开始编号
@@ -122,7 +191,7 @@ week 作为子周期时，统一使用下面的编号规则：
 - 父周期起点到第一个周一之前的残缺天数不编号
 - 父周期末尾如果有从周一开始但被截断的周，这段仍然算最后一周
 
-7. select_weekday
+11. select_weekday
 - op = "select_weekday"
 - weekday: 1 到 7，1=周一，7=周日
 - base: 一个 expr 对象，且其结果必须是一个 week 区间
@@ -132,7 +201,7 @@ week 作为子周期时，统一使用下面的编号规则：
 - 例如“上周二”“第二周的周二”
 - 不能表示“这个月第二个周二”这种父周期内按出现次数选择的含义
 
-8. select_weekend
+12. select_weekend
 - op = "select_weekend"
 - base: 一个 expr 对象，且其结果必须是一个 week 区间
 
@@ -141,7 +210,7 @@ week 作为子周期时，统一使用下面的编号规则：
 - 返回该周的周六到周日
 - 例如“第四周的周末”
 
-9. select_occurrence
+13. select_occurrence
 - op = "select_occurrence"
 - kind: 只允许 "weekday" 或 "weekend"
 - ordinal: 正整数或 "last"
@@ -154,22 +223,22 @@ week 作为子周期时，统一使用下面的编号规则：
 - “第二个周二” 和 “第二周的周二” 语义不同，不得混淆
 - “第二个周末” 和 “第二周的周末” 语义不同，不得混淆
 
-10. select_month
+14. select_month
 - op = "select_month"
 - month: 1 到 12
 - base: 一个 expr 对象
 
-11. select_quarter
+15. select_quarter
 - op = "select_quarter"
 - quarter: 1 到 4
 - base: 一个 expr 对象
 
-12. select_half_year
+16. select_half_year
 - op = "select_half_year"
 - half: 1 或 2，1=上半年，2=下半年
 - base: 一个 expr 对象
 
-13. reference
+17. reference
 - ref: string，引用前面已经出现过的时间字段 id，例如 t1
 
 规则：
@@ -190,6 +259,16 @@ week 作为子周期时，统一使用下面的编号规则：
 - “第N个周二 / 最后一个周日 / 第N个周末 / 最后一个周末” 这类父周期内按出现次数选择的表达，必须使用 select_occurrence
 - “第N周的周二 / 第N周的周末” 这类周内选择表达，必须先使用 select_subperiod 选出第 N 周，再用 select_weekday 或 select_weekend
 - select_weekday 只能用于 week base；不要把 month/quarter/year 直接作为 select_weekday 的 base
+- “去年国庆假期 / 今年春节假期 / 去年中秋法定假期” 这类命名节假日区间，必须优先使用 calendar_event_range
+- “假期开始日 / 假期结束日” 这类边界表达，必须使用 range_edge
+- “端午节当天 / 国庆节当天 / 中秋节当天”等「某节当天」且该节国务院安排为连续多日放假时：先用 calendar_event_range(region, event_key, year, consecutive_rest) 表示该节连休，再用 range_edge(edge="start", base=...) 取连休首日作为「正日」当日（现行安排下端午、中秋等与连休首日一致）；不要凭空 select_month 猜公历；若日历 JSON 已为该节维护 scope=statutory 且仅为正日一天，也可用 statutory 代替上述组合
+- “节前最后一个工作日 / 节后第一个工作日” 这类业务日表达，必须使用 business_day_offset，并以单日 base 为锚点
+- “某个月的工作日 / 休息日 / 节假日” 这类范围内按业务日历筛选日期的表达，必须使用 enumerate_calendar_days
+- “某节调休上班日 / 某节补班日 / 某节调休补班是哪些日期” 这类表达，必须使用 enumerate_makeup_workdays
+- 禁止把这类问题解析成 enumerate_calendar_days；不要先构造 calendar_event_range(..., consecutive_rest) 再枚举 workday
+- “工作日” 对应 day_kind="workday"
+- “休息日” 对应 day_kind="restday"
+- “节假日” 对应 day_kind="holiday"
 
 输出要求：
 - 只输出 JSON
@@ -497,6 +576,87 @@ week 作为子周期时，统一使用下面的编号规则：
             }
           }
         }
+      }
+    }
+  ]
+}
+
+标准输出样例11：
+问题：去年国庆假期前最后一个工作日是哪天
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "去年国庆假期前最后一个工作日",
+      "expr": {
+        "op": "business_day_offset",
+        "region": "CN",
+        "value": -1,
+        "base": {
+          "op": "shift",
+          "unit": "day",
+          "value": -1,
+          "base": {
+            "op": "range_edge",
+            "edge": "start",
+            "base": {
+              "op": "calendar_event_range",
+              "region": "CN",
+              "event_key": "national_day",
+              "year": 2025,
+              "scope": "consecutive_rest"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例12：
+问题：2025年10月份的工作日均值收益是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "2025年10月工作日",
+      "expr": {
+        "op": "enumerate_calendar_days",
+        "region": "CN",
+        "day_kind": "workday",
+        "base": {
+          "op": "select_month",
+          "month": 10,
+          "base": {
+            "op": "shift",
+            "unit": "year",
+            "value": -1,
+            "base": {
+              "op": "current_period",
+              "unit": "year"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例13：
+问题：2025年春节调休补班是哪些日期
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "2025年春节调休补班",
+      "expr": {
+        "op": "enumerate_makeup_workdays",
+        "region": "CN",
+        "event_key": "spring_festival",
+        "year": 2025
       }
     }
   ]

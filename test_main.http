@@ -134,3 +134,16 @@ Content-Type: application/json
   "timezone": "Asia/Shanghai",
   "rewrite": true
 }
+
+###
+
+POST http://127.0.0.1:8000/query/pipeline
+Accept: application/json
+Content-Type: application/json
+
+{
+  "query": "去年国庆假期前最后一个工作日是哪天",
+  "system_date": "2026-04-07",
+  "timezone": "Asia/Shanghai",
+  "rewrite": true
+}

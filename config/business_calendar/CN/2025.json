@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "region": "CN",
+  "calendar_version": "cn-2025-gov-20241112",
+  "days": [
+    {
+      "date": "2025-01-01",
+      "work_kind": "rest",
+      "labels": [
+        "new_year"
+      ],
+      "rest_group_id": "cn-2025-new-year",
+      "note": "元旦"
+    },
+    {
+      "date": "2025-01-26",
+      "work_kind": "work",
+      "labels": [
+        "makeup_workday"
+      ],
+      "related_event_keys": [
+        "spring_festival"
+      ],
+      "note": "春节调休补班（周日上班）"
+    },
+    {
+      "date": "2025-01-28",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring",
+      "note": "除夕"
+    },
+    {
+      "date": "2025-01-29",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-01-30",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-01-31",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-02-01",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-02-02",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-02-03",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "date": "2025-02-04",
+      "work_kind": "rest",
+      "labels": [
+        "spring_festival"
+      ],
+      "rest_group_id": "cn-2025-spring",
+      "note": "正月初七"
+    },
+    {
+      "date": "2025-02-08",
+      "work_kind": "work",
+      "labels": [
+        "makeup_workday"
+      ],
+      "related_event_keys": [
+        "spring_festival"
+      ],
+      "note": "春节调休补班（周六上班）"
+    },
+    {
+      "date": "2025-04-04",
+      "work_kind": "rest",
+      "labels": [
+        "qingming"
+      ],
+      "rest_group_id": "cn-2025-qingming"
+    },
+    {
+      "date": "2025-04-05",
+      "work_kind": "rest",
+      "labels": [
+        "qingming"
+      ],
+      "rest_group_id": "cn-2025-qingming"
+    },
+    {
+      "date": "2025-04-06",
+      "work_kind": "rest",
+      "labels": [
+        "qingming"
+      ],
+      "rest_group_id": "cn-2025-qingming"
+    },
+    {
+      "date": "2025-04-27",
+      "work_kind": "work",
+      "labels": [
+        "makeup_workday"
+      ],
+      "related_event_keys": [
+        "labor_day"
+      ],
+      "note": "劳动节调休补班（周日上班）"
+    },
+    {
+      "date": "2025-05-01",
+      "work_kind": "rest",
+      "labels": [
+        "labor_day"
+      ],
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "date": "2025-05-02",
+      "work_kind": "rest",
+      "labels": [
+        "labor_day"
+      ],
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "date": "2025-05-03",
+      "work_kind": "rest",
+      "labels": [
+        "labor_day"
+      ],
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "date": "2025-05-04",
+      "work_kind": "rest",
+      "labels": [
+        "labor_day"
+      ],
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "date": "2025-05-05",
+      "work_kind": "rest",
+      "labels": [
+        "labor_day"
+      ],
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "date": "2025-05-31",
+      "work_kind": "rest",
+      "labels": [
+        "dragon_boat"
+      ],
+      "rest_group_id": "cn-2025-dragon-boat"
+    },
+    {
+      "date": "2025-06-01",
+      "work_kind": "rest",
+      "labels": [
+        "dragon_boat"
+      ],
+      "rest_group_id": "cn-2025-dragon-boat"
+    },
+    {
+      "date": "2025-06-02",
+      "work_kind": "rest",
+      "labels": [
+        "dragon_boat"
+      ],
+      "rest_group_id": "cn-2025-dragon-boat"
+    },
+    {
+      "date": "2025-09-28",
+      "work_kind": "work",
+      "labels": [
+        "makeup_workday"
+      ],
+      "related_event_keys": [
+        "mid_autumn",
+        "national_day"
+      ],
+      "note": "国庆中秋调休补班（周日上班）"
+    },
+    {
+      "date": "2025-10-01",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-02",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-03",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-04",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-05",
+      "work_kind": "rest",
+      "labels": [
+        "mid_autumn",
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged",
+      "note": "中秋节（农历八月十五）"
+    },
+    {
+      "date": "2025-10-06",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-07",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-08",
+      "work_kind": "rest",
+      "labels": [
+        "national_day"
+      ],
+      "rest_group_id": "cn-2025-autumn-merged"
+    },
+    {
+      "date": "2025-10-11",
+      "work_kind": "work",
+      "labels": [
+        "makeup_workday"
+      ],
+      "related_event_keys": [
+        "mid_autumn",
+        "national_day"
+      ],
+      "note": "国庆中秋调休补班（周六上班）"
+    }
+  ],
+  "event_spans": [
+    {
+      "event_key": "new_year",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-01-01",
+      "end": "2025-01-01",
+      "rest_group_id": "cn-2025-new-year"
+    },
+    {
+      "event_key": "spring_festival",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-01-28",
+      "end": "2025-02-04",
+      "rest_group_id": "cn-2025-spring"
+    },
+    {
+      "event_key": "qingming",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-04-04",
+      "end": "2025-04-06",
+      "rest_group_id": "cn-2025-qingming"
+    },
+    {
+      "event_key": "labor_day",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-05-01",
+      "end": "2025-05-05",
+      "rest_group_id": "cn-2025-labor"
+    },
+    {
+      "event_key": "dragon_boat",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-05-31",
+      "end": "2025-06-02",
+      "rest_group_id": "cn-2025-dragon-boat"
+    },
+    {
+      "event_key": "national_day",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-10-01",
+      "end": "2025-10-08",
+      "rest_group_id": "cn-2025-autumn-merged",
+      "co_event_keys": [
+        "mid_autumn"
+      ]
+    },
+    {
+      "event_key": "mid_autumn",
+      "year": 2025,
+      "scope": "consecutive_rest",
+      "start": "2025-10-01",
+      "end": "2025-10-08",
+      "rest_group_id": "cn-2025-autumn-merged",
+      "co_event_keys": [
+        "national_day"
+      ]
+    },
+    {
+      "event_key": "national_day",
+      "year": 2025,
+      "scope": "statutory",
+      "start": "2025-10-01",
+      "end": "2025-10-03"
+    },
+    {
+      "event_key": "mid_autumn",
+      "year": 2025,
+      "scope": "statutory",
+      "start": "2025-10-06",
+      "end": "2025-10-06"
+    }
+  ]
+}

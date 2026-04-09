@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SLICE_SUBPERIODS_CONFIG_PATH = PROJECT_ROOT / "config" / "slice_subperiods_limits.json"
+DEFAULT_BUSINESS_CALENDAR_ROOT = PROJECT_ROOT / "config" / "business_calendar"
 DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_DASHSCOPE_MODEL_NAME = "qwen3.6-plus"
 
@@ -39,6 +40,10 @@ def require_llm_config(*, dotenv_path: Path | None = None) -> LlmConfig:
     if not config.api_key:
         raise RuntimeError("Missing DASHSCOPE_API_KEY. Set it in .env or your shell environment.")
     return config
+
+
+def get_business_calendar_root() -> Path:
+    return Path(os.getenv("BUSINESS_CALENDAR_ROOT", str(DEFAULT_BUSINESS_CALENDAR_ROOT)))
 
 
 def get_slice_subperiod_max_counts(*, config_path: Path | None = None) -> dict[str, dict[str, int]]:

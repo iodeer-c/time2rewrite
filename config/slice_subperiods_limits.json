@@ -1,0 +1,29 @@
+{
+  "max_count": {
+    "week": {
+      "day": 7
+    },
+    "month": {
+      "day": 31,
+      "week": 5
+    },
+    "quarter": {
+      "day": 92,
+      "week": 14,
+      "month": 3
+    },
+    "half_year": {
+      "day": 184,
+      "week": 27,
+      "month": 6,
+      "quarter": 2
+    },
+    "year": {
+      "day": 366,
+      "week": 53,
+      "month": 12,
+      "quarter": 4,
+      "half_year": 2
+    }
+  }
+}

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from time_query_service.config import get_slice_subperiod_max_counts
+from time_query_service.business_calendar import BusinessCalendarPort, JsonBusinessCalendar
+from time_query_service.config import get_business_calendar_root, get_slice_subperiod_max_counts
 from time_query_service.schemas import ParsedTimeExpressions, ResolvedTimeExpressions
 
 
@@ -372,10 +374,75 @@ def select_occurrence_range(base: TimeRange, kind: str, ordinal: int | str, week
     return occurrences[ordinal - 1]
 
 
+def _ensure_single_day(base: TimeRange, op_name: str) -> date:
+    if base.start.date() != base.end.date():
+        raise ValueError(f"{op_name} requires a single-day base.")
+    return base.start.date()
+
+
+def range_edge(base: TimeRange, edge: str) -> TimeRange:
+    if edge == "start":
+        target = base.start
+    else:
+        target = base.end
+    return TimeRange(start_of_day(target), end_of_day(target), grain="day")
+
+
+def business_day_offset_range(
+    *,
+    base: TimeRange,
+    value: int,
+    region: str,
+    business_calendar: BusinessCalendarPort,
+    calendar_versions: set[str] | None = None,
+) -> TimeRange:
+    anchor = _ensure_single_day(base, "business_day_offset")
+    remaining = abs(value)
+    step = 1 if value > 0 else -1
+    cursor = anchor
+    checked_years: set[int] = set()
+
+    while True:
+        if cursor.year not in checked_years:
+            version = business_calendar.calendar_version_for_year(region=region, year=cursor.year)
+            if version is None:
+                raise ValueError(f"Missing business calendar data for region={region}, year={cursor.year}")
+            if calendar_versions is not None:
+                calendar_versions.add(version)
+            checked_years.add(cursor.year)
+        if business_calendar.is_workday(region=region, d=cursor):
+            remaining -= 1
+            if remaining == 0:
+                target = datetime.combine(cursor, datetime.min.time(), tzinfo=base.start.tzinfo)
+                return TimeRange(start_of_day(target), end_of_day(target), grain="day")
+        cursor = cursor + timedelta(days=step)
+
+
+def _expr_uses_business_calendar(expr: Mapping[str, Any] | Any) -> bool:
+    payload = _normalize_expr(expr)
+    if payload.get("op") in {
+        "calendar_event_range",
+        "business_day_offset",
+        "enumerate_calendar_days",
+        "enumerate_makeup_workdays",
+    }:
+        return True
+    for value in payload.values():
+        if hasattr(value, "model_dump"):
+            if _expr_uses_business_calendar(value):
+                return True
+        elif isinstance(value, Mapping):
+            if _expr_uses_business_calendar(value):
+                return True
+    return False
+
+
 def eval_expr(
     expr: Mapping[str, Any] | Any,
     system_dt: datetime,
     context: Mapping[str, TimeRange] | None = None,
+    business_calendar: BusinessCalendarPort | None = None,
+    calendar_versions: set[str] | None = None,
 ) -> TimeRange:
     payload = _normalize_expr(expr)
     op = payload["op"]
@@ -387,35 +454,137 @@ def eval_expr(
         return current_period(system_dt, payload["unit"])
 
     if op == "shift":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         return shift_range(base, payload["unit"], payload["value"])
 
     if op == "rolling":
         return rolling_range(system_dt, payload["unit"], payload["value"])
 
+    if op == "calendar_event_range":
+        if business_calendar is None:
+            raise ValueError("Business calendar is required for calendar_event_range.")
+        version = business_calendar.calendar_version_for_year(region=payload["region"], year=payload["year"])
+        if version is None:
+            raise ValueError(f"Missing business calendar data for region={payload['region']}, year={payload['year']}")
+        span = business_calendar.get_event_span(
+            region=payload["region"],
+            event_key=payload["event_key"],
+            year=payload["year"],
+            scope=payload["scope"],
+        )
+        if span is None:
+            raise ValueError(
+                f"Missing business calendar data for region={payload['region']}, "
+                f"event_key={payload['event_key']}, year={payload['year']}, scope={payload['scope']}"
+            )
+        if calendar_versions is not None:
+            calendar_versions.add(version)
+        start, end = span
+        start_dt = datetime.combine(start, datetime.min.time(), tzinfo=system_dt.tzinfo)
+        end_dt = datetime.combine(end, datetime.min.time(), tzinfo=system_dt.tzinfo)
+        return TimeRange(start_of_day(start_dt), end_of_day(end_dt), grain=None)
+
+    if op == "range_edge":
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
+        return range_edge(base, payload["edge"])
+
+    if op == "business_day_offset":
+        if business_calendar is None:
+            raise ValueError("Business calendar is required for business_day_offset.")
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
+        return business_day_offset_range(
+            base=base,
+            value=payload["value"],
+            region=payload["region"],
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
+
+    if op == "enumerate_calendar_days":
+        if business_calendar is None:
+            raise ValueError("Business calendar is required for enumerate_calendar_days.")
+        return eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
+
+    if op == "enumerate_makeup_workdays":
+        raise ValueError("enumerate_makeup_workdays must be resolved via resolve_query.")
+
     if op == "slice_subperiods":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         return slice_subperiods_range(base, payload["mode"], payload["unit"], payload["count"])
 
     if op == "select_subperiod":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         return select_subperiod_range(base, payload["unit"], payload["index"])
 
     if op == "select_weekday":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         _require_week_base(base, "select_weekday")
         target = base.start + timedelta(days=payload["weekday"] - 1)
         return TimeRange(start_of_day(target), end_of_day(target), grain="day")
 
     if op == "select_weekend":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         _require_week_base(base, "select_weekend")
         start = start_of_day(base.start + timedelta(days=5))
         end = end_of_day(base.start + timedelta(days=6))
         return TimeRange(start, end, grain=None)
 
     if op == "select_occurrence":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         return select_occurrence_range(
             base,
             payload["kind"],
@@ -424,19 +593,37 @@ def eval_expr(
         )
 
     if op == "select_month":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         month = payload["month"]
         year = base.start.year
         return _natural_month_range(year, month, base.start.tzinfo)
 
     if op == "select_quarter":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         quarter = payload["quarter"]
         year = base.start.year
         return _natural_quarter_range(year, quarter, base.start.tzinfo)
 
     if op == "select_half_year":
-        base = eval_expr(payload["base"], system_dt, context)
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         return _natural_half_year_range(base.start.year, payload["half"], base.start.tzinfo)
 
     if op == "reference":
@@ -447,28 +634,195 @@ def eval_expr(
     raise ValueError(f"Unsupported op: {op}")
 
 
+def _iter_dates(start: date, end: date) -> list[date]:
+    dates: list[date] = []
+    cursor = start
+    while cursor <= end:
+        dates.append(cursor)
+        cursor = cursor + timedelta(days=1)
+    return dates
+
+
+def _filter_calendar_dates(
+    *,
+    base: TimeRange,
+    region: str,
+    day_kind: str,
+    business_calendar: BusinessCalendarPort,
+    calendar_versions: set[str] | None = None,
+) -> list[date]:
+    dates = _iter_dates(base.start.date(), base.end.date())
+    years = sorted({d.year for d in dates})
+    missing_years = [
+        year for year in years if business_calendar.calendar_version_for_year(region=region, year=year) is None
+    ]
+    if missing_years:
+        raise ValueError(f"Missing business calendar data for region={region}, year={missing_years[0]}")
+    if calendar_versions is not None:
+        for year in years:
+            version = business_calendar.calendar_version_for_year(region=region, year=year)
+            if version is not None:
+                calendar_versions.add(version)
+
+    if day_kind == "workday":
+        return [d for d in dates if business_calendar.is_workday(region=region, d=d)]
+    if day_kind == "restday":
+        return [d for d in dates if not business_calendar.is_workday(region=region, d=d)]
+    if day_kind == "holiday":
+        return [d for d in dates if business_calendar.is_holiday(region=region, d=d)]
+    raise ValueError(f"Unsupported calendar day kind: {day_kind}")
+
+
+def _merge_dates_to_ranges(dates: list[date], tzinfo) -> list[TimeRange]:
+    if not dates:
+        return []
+
+    ranges: list[TimeRange] = []
+    segment_start = dates[0]
+    segment_end = dates[0]
+
+    for current in dates[1:]:
+        if current == segment_end + timedelta(days=1):
+            segment_end = current
+            continue
+
+        start_dt = datetime.combine(segment_start, datetime.min.time(), tzinfo=tzinfo)
+        end_dt = datetime.combine(segment_end, datetime.min.time(), tzinfo=tzinfo)
+        ranges.append(TimeRange(start_of_day(start_dt), end_of_day(end_dt), grain=None))
+        segment_start = current
+        segment_end = current
+
+    start_dt = datetime.combine(segment_start, datetime.min.time(), tzinfo=tzinfo)
+    end_dt = datetime.combine(segment_end, datetime.min.time(), tzinfo=tzinfo)
+    ranges.append(TimeRange(start_of_day(start_dt), end_of_day(end_dt), grain=None))
+    return ranges
+
+
 def resolve_query(
     parsed_time_expressions: dict[str, Any] | ParsedTimeExpressions,
     system_date: str,
     timezone: str,
+    business_calendar: BusinessCalendarPort | None = None,
+    business_calendar_root: Path | None = None,
 ) -> dict[str, Any]:
     parsed = ParsedTimeExpressions.model_validate(parsed_time_expressions)
     system_dt = datetime.strptime(system_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone))
+    if business_calendar is None:
+        needs_business_calendar = any(_expr_uses_business_calendar(item.expr) for item in parsed.time_expressions)
+        if needs_business_calendar:
+            business_calendar = JsonBusinessCalendar.from_root(root=business_calendar_root or get_business_calendar_root())
     resolved_map: dict[str, TimeRange] = {}
     resolved_items = []
+    calendar_versions: set[str] = set()
+    enumerated_counts: dict[str, int] = {}
     for item in parsed.time_expressions:
-        resolved = eval_expr(item.expr, system_dt, resolved_map)
+        expr_payload = _normalize_expr(item.expr)
+        if expr_payload["op"] == "enumerate_calendar_days":
+            if business_calendar is None:
+                raise ValueError("Business calendar is required for enumerate_calendar_days.")
+            base = eval_expr(
+                expr_payload["base"],
+                system_dt,
+                resolved_map,
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+            )
+            resolved_map[item.id] = base
+            matched_dates = _filter_calendar_dates(
+                base=base,
+                region=expr_payload["region"],
+                day_kind=expr_payload["day_kind"],
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+            )
+            enumerated_counts[item.id] = len(matched_dates)
+            segments = _merge_dates_to_ranges(matched_dates, base.start.tzinfo)
+            for index, segment in enumerate(segments, start=1):
+                resolved_items.append(
+                    {
+                        "id": f"{item.id}__seg_{index:02d}",
+                        "text": item.text,
+                        "source_id": item.id,
+                        "source_text": item.text,
+                        "start_time": segment.start.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_time": segment.end.strftime("%Y-%m-%d %H:%M:%S"),
+                        "timezone": timezone,
+                    }
+                )
+            continue
+
+        if expr_payload["op"] == "enumerate_makeup_workdays":
+            if business_calendar is None:
+                raise ValueError("Business calendar is required for enumerate_makeup_workdays.")
+            version = business_calendar.calendar_version_for_year(
+                region=expr_payload["region"],
+                year=expr_payload["year"],
+            )
+            if version is None:
+                raise ValueError(
+                    f"Missing business calendar data for region={expr_payload['region']}, "
+                    f"year={expr_payload['year']}"
+                )
+            calendar_versions.add(version)
+            matched_dates = business_calendar.list_makeup_workdays(
+                region=expr_payload["region"],
+                event_key=expr_payload["event_key"],
+                year=expr_payload["year"],
+            )
+            enumerated_counts[item.id] = len(matched_dates)
+            segments = _merge_dates_to_ranges(matched_dates, system_dt.tzinfo)
+            for index, segment in enumerate(segments, start=1):
+                resolved_items.append(
+                    {
+                        "id": f"{item.id}__seg_{index:02d}",
+                        "text": item.text,
+                        "source_id": item.id,
+                        "source_text": item.text,
+                        "start_time": segment.start.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_time": segment.end.strftime("%Y-%m-%d %H:%M:%S"),
+                        "timezone": timezone,
+                    }
+                )
+            continue
+
+        resolved = eval_expr(
+            item.expr,
+            system_dt,
+            resolved_map,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+        )
         resolved_map[item.id] = resolved
         resolved_items.append(
             {
                 "id": item.id,
                 "text": item.text,
+                "source_id": None,
+                "source_text": None,
                 "start_time": resolved.start.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": resolved.end.strftime("%Y-%m-%d %H:%M:%S"),
                 "timezone": timezone,
             }
         )
 
-    return ResolvedTimeExpressions(
+    metadata = None
+    if calendar_versions or enumerated_counts:
+        metadata = {
+            "calendar_version": ",".join(sorted(calendar_versions)) if calendar_versions else None,
+            "enumerated_counts": enumerated_counts or None,
+        }
+
+    payload = ResolvedTimeExpressions(
         resolved_time_expressions=resolved_items,
-    ).model_dump(mode="python")
+        metadata=metadata,
+    ).model_dump(mode="python", exclude_none=False)
+    if payload.get("metadata") is None:
+        payload.pop("metadata", None)
+    else:
+        if payload["metadata"].get("calendar_version") is None:
+            payload["metadata"].pop("calendar_version", None)
+        if payload["metadata"].get("enumerated_counts") is None:
+            payload["metadata"].pop("enumerated_counts", None)
+        if not payload["metadata"]:
+            payload.pop("metadata", None)
+    return payload

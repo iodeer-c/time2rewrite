@@ -1,5 +1,9 @@
+import logging
+
 from fastapi import FastAPI
 
+from time_query_service.business_calendar import JsonBusinessCalendar
+from time_query_service.config import get_business_calendar_root
 from time_query_service.schemas import (
     ParseQueryRequest,
     ParsedTimeExpressions,
@@ -12,8 +16,26 @@ from time_query_service.schemas import (
 )
 from time_query_service.service import QueryPipelineService
 
+logger = logging.getLogger(__name__)
+
+
+def _load_business_calendar() -> JsonBusinessCalendar | None:
+    root = get_business_calendar_root()
+    if not root.exists():
+        logger.warning(
+            "Business calendar root missing: %s — named holidays will fail at resolve time.",
+            root,
+        )
+        return None
+    try:
+        return JsonBusinessCalendar.from_root(root=root)
+    except ValueError as exc:
+        logger.warning("Business calendar not loaded: %s", exc)
+        return None
+
+
 app = FastAPI(title="Time Query Service")
-query_service = QueryPipelineService()
+query_service = QueryPipelineService(business_calendar=_load_business_calendar())
 
 
 @app.get("/")

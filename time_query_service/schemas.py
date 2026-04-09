@@ -13,6 +13,9 @@ TimeUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
 SliceMode = Literal["first", "last"]
 SliceUnit = Literal["day", "week", "month", "quarter"]
 SelectSubperiodUnit = Literal["day", "week", "month", "quarter", "half_year"]
+CalendarEventScope = Literal["consecutive_rest", "statutory"]
+RangeEdge = Literal["start", "end"]
+CalendarDayKind = Literal["workday", "restday", "holiday"]
 
 
 class AnchorExpr(StrictModel):
@@ -37,6 +40,47 @@ class RollingExpr(StrictModel):
     unit: TimeUnit
     value: int = Field(ge=1)
     anchor: Literal["system_date"]
+
+
+class CalendarEventRangeExpr(StrictModel):
+    op: Literal["calendar_event_range"]
+    region: str = "CN"
+    event_key: str
+    year: int
+    scope: CalendarEventScope
+
+
+class RangeEdgeExpr(StrictModel):
+    op: Literal["range_edge"]
+    edge: RangeEdge
+    base: "Expr"
+
+
+class BusinessDayOffsetExpr(StrictModel):
+    op: Literal["business_day_offset"]
+    region: str = "CN"
+    value: int
+    base: "Expr"
+
+    @model_validator(mode="after")
+    def validate_nonzero_value(self) -> "BusinessDayOffsetExpr":
+        if self.value == 0:
+            raise ValueError("business_day_offset value must not be zero")
+        return self
+
+
+class EnumerateCalendarDaysExpr(StrictModel):
+    op: Literal["enumerate_calendar_days"]
+    region: str = "CN"
+    day_kind: CalendarDayKind
+    base: "Expr"
+
+
+class EnumerateMakeupWorkdaysExpr(StrictModel):
+    op: Literal["enumerate_makeup_workdays"]
+    region: str = "CN"
+    event_key: str
+    year: int
 
 
 class SelectWeekdayExpr(StrictModel):
@@ -113,6 +157,11 @@ Expr = Annotated[
     | CurrentPeriodExpr
     | ShiftExpr
     | RollingExpr
+    | CalendarEventRangeExpr
+    | RangeEdgeExpr
+    | BusinessDayOffsetExpr
+    | EnumerateCalendarDaysExpr
+    | EnumerateMakeupWorkdaysExpr
     | SelectWeekdayExpr
     | SelectWeekendExpr
     | SelectMonthExpr
@@ -126,6 +175,10 @@ Expr = Annotated[
 ]
 
 ShiftExpr.model_rebuild()
+RangeEdgeExpr.model_rebuild()
+BusinessDayOffsetExpr.model_rebuild()
+EnumerateCalendarDaysExpr.model_rebuild()
+EnumerateMakeupWorkdaysExpr.model_rebuild()
 SelectWeekdayExpr.model_rebuild()
 SelectWeekendExpr.model_rebuild()
 SelectMonthExpr.model_rebuild()
@@ -158,13 +211,21 @@ class ParsedTimeExpressions(StrictModel):
 class ResolvedTimeExpression(StrictModel):
     id: str
     text: str
+    source_id: str | None = None
+    source_text: str | None = None
     start_time: str
     end_time: str
     timezone: str
 
 
+class ResolvedMetadata(StrictModel):
+    calendar_version: str | None = None
+    enumerated_counts: dict[str, int] | None = None
+
+
 class ResolvedTimeExpressions(StrictModel):
     resolved_time_expressions: list[ResolvedTimeExpression] = Field(default_factory=list)
+    metadata: ResolvedMetadata | None = None
 
 
 class ParseQueryRequest(StrictModel):

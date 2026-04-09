@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -116,12 +118,77 @@ def build_rewriter_user_prompt(original_query: str, resolved_time_expressions: R
                 [
                     f"- id: {item.id}",
                     f"- text: {item.text}",
+                    f"  source_id: {item.source_id}",
+                    f"  source_text: {item.source_text}",
                     f"  start_time: {item.start_time}",
                     f"  end_time: {item.end_time}",
                     f"  timezone: {item.timezone}",
                 ]
             )
+    if resolved_time_expressions.metadata is not None:
+        lines.append("metadata:")
+        lines.append(f"- calendar_version: {resolved_time_expressions.metadata.calendar_version}")
+        lines.append(f"- enumerated_counts: {resolved_time_expressions.metadata.enumerated_counts}")
     return "\n".join(lines)
+
+
+def _parse_resolved_time(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+
+
+def _format_date(dt: datetime) -> str:
+    return f"{dt.year}年{dt.month}月{dt.day}日"
+
+
+def _format_range(start_time: str, end_time: str) -> str:
+    start = _parse_resolved_time(start_time)
+    end = _parse_resolved_time(end_time)
+    if start.date() == end.date():
+        return _format_date(start)
+    return f"{_format_date(start)}至{_format_date(end)}"
+
+
+def _extract_calendar_day_label(source_text: str) -> str:
+    if "工作日" in source_text:
+        return "工作日"
+    if "休息日" in source_text:
+        return "休息日"
+    if "节假日" in source_text:
+        return "节假日"
+    return source_text
+
+
+def _rewrite_enumerated_calendar_days(
+    *,
+    original_query: str,
+    resolved: ResolvedTimeExpressions,
+) -> str | None:
+    grouped: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+    has_enumerated_segments = False
+
+    for item in resolved.resolved_time_expressions:
+        if item.source_id is None:
+            continue
+        has_enumerated_segments = True
+        group = grouped.setdefault(
+            item.source_id,
+            {
+                "source_text": item.source_text or item.text,
+                "ranges": [],
+            },
+        )
+        group["ranges"].append(_format_range(item.start_time, item.end_time))
+
+    if not has_enumerated_segments:
+        return None
+
+    clauses = []
+    for group in grouped.values():
+        label = _extract_calendar_day_label(group["source_text"])
+        clauses.append(f"{label}为{'、'.join(group['ranges'])}")
+
+    prefix = "，其中"
+    return f"{original_query}{prefix}{'；其中'.join(clauses)}"
 
 
 class QueryRewriter:
@@ -165,6 +232,13 @@ class QueryRewriter:
         resolved = ResolvedTimeExpressions.model_validate(resolved_time_expressions)
         if not resolved.resolved_time_expressions:
             return original_query
+
+        enumerated_rewrite = _rewrite_enumerated_calendar_days(
+            original_query=original_query,
+            resolved=resolved,
+        )
+        if enumerated_rewrite is not None:
+            return enumerated_rewrite
 
         messages = [
             SystemMessage(content=REWRITER_SYSTEM_PROMPT),
