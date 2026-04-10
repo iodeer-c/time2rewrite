@@ -144,13 +144,13 @@ expr 只允许以下 op：
   - dragon_boat
   - mid_autumn
   - national_day
-- year: 公历年整数
+- schedule_year: 节假安排年整数
 - scope: 只允许 "consecutive_rest" 或 "statutory"
 
 语义：
 - 直接表示某个命名节假日区间
 - 例如“去年国庆假期”“今年中秋法定假期”
-- 不允许自己编造具体公历日期，必须通过 event_key + year + scope 表达
+- 不允许自己编造具体公历日期，必须通过 event_key + schedule_year + scope 表达
 
 6. range_edge
 - op = "range_edge"
@@ -190,10 +190,10 @@ expr 只允许以下 op：
 - op = "enumerate_makeup_workdays"
 - region: 字符串，默认使用 "CN"
 - event_key: 节日键，必须与业务日日历数据一致
-- year: 公历年整数
+- schedule_year: 节假安排年整数
 
 语义：
-- 直接按业务日历枚举某个命名节假日在该公历年关联的调休补班日
+- 直接按业务日历枚举某个命名节假日在该 schedule_year 关联的调休补班日
 - 不需要 base，不要先构造连续连休区间
 - 例如“2025年春节调休补班是哪些日期”“2025年中秋调休上班日是哪些日期”
 
@@ -401,7 +401,7 @@ week 作为子周期时，统一使用下面的编号规则：
 - select_weekday 只能用于 week base；不要把 month/quarter/year 直接作为 select_weekday 的 base
 - “去年国庆假期 / 今年春节假期 / 去年中秋法定假期” 这类命名节假日区间，必须优先使用 calendar_event_range
 - “假期开始日 / 假期结束日” 这类边界表达，必须使用 range_edge
-- “端午节当天 / 国庆节当天 / 中秋节当天”等「某节当天」且该节国务院安排为连续多日放假时：先用 calendar_event_range(region, event_key, year, consecutive_rest) 表示该节连休，再用 range_edge(edge="start", base=...) 取连休首日作为「正日」当日（现行安排下端午、中秋等与连休首日一致）；不要凭空 select_month 猜公历；若日历 JSON 已为该节维护 scope=statutory 且仅为正日一天，也可用 statutory 代替上述组合
+- “端午节当天 / 国庆节当天 / 中秋节当天”等「某节当天」且该节国务院安排为连续多日放假时：先用 calendar_event_range(region, event_key, schedule_year, consecutive_rest) 表示该节连休，再用 range_edge(edge="start", base=...) 取连休首日作为「正日」当日（现行安排下端午、中秋等与连休首日一致）；不要凭空 select_month 猜公历；若日历 JSON 已为该节维护 scope=statutory 且仅为正日一天，也可用 statutory 代替上述组合
 - “节前最后一个工作日 / 节后第一个工作日” 这类业务日表达，必须使用 business_day_offset，并以单日 base 为锚点
 - “某个月的工作日 / 休息日 / 节假日” 这类范围内按业务日历筛选日期的表达，必须使用 enumerate_calendar_days
 - “某节调休上班日 / 某节补班日 / 某节调休补班是哪些日期” 这类表达，必须使用 enumerate_makeup_workdays
@@ -758,7 +758,7 @@ week 作为子周期时，统一使用下面的编号规则：
               "op": "calendar_event_range",
               "region": "CN",
               "event_key": "national_day",
-              "year": 2025,
+              "schedule_year": 2025,
               "scope": "consecutive_rest"
             }
           }
@@ -810,7 +810,7 @@ week 作为子周期时，统一使用下面的编号规则：
         "op": "enumerate_makeup_workdays",
         "region": "CN",
         "event_key": "spring_festival",
-        "year": 2025
+        "schedule_year": 2025
       }
     }
   ]

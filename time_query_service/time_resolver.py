@@ -669,17 +669,12 @@ def business_day_offset_range(
     remaining = abs(value)
     step = 1 if value > 0 else -1
     cursor = anchor
-    checked_years: set[int] = set()
 
     while True:
-        if cursor.year not in checked_years:
-            version = business_calendar.calendar_version_for_year(region=region, year=cursor.year)
-            if version is None:
-                raise ValueError(f"Missing business calendar data for region={region}, year={cursor.year}")
-            if calendar_versions is not None:
-                calendar_versions.add(version)
-            checked_years.add(cursor.year)
-        if business_calendar.is_workday(region=region, d=cursor):
+        status = business_calendar.get_day_status(region=region, d=cursor)
+        if calendar_versions is not None:
+            calendar_versions.update(status.calendar_versions)
+        if status.is_workday:
             remaining -= 1
             if remaining == 0:
                 target = datetime.combine(cursor, datetime.min.time(), tzinfo=base.start.tzinfo)
@@ -834,19 +829,26 @@ def eval_expr(
     if op == "calendar_event_range":
         if business_calendar is None:
             raise ValueError("Business calendar is required for calendar_event_range.")
-        version = business_calendar.calendar_version_for_year(region=payload["region"], year=payload["year"])
+        version = business_calendar.calendar_version_for_schedule_year(
+            region=payload["region"],
+            schedule_year=payload["schedule_year"],
+        )
         if version is None:
-            raise ValueError(f"Missing business calendar data for region={payload['region']}, year={payload['year']}")
+            raise ValueError(
+                f"Missing business calendar data for region={payload['region']}, "
+                f"schedule_year={payload['schedule_year']}"
+            )
         span = business_calendar.get_event_span(
             region=payload["region"],
             event_key=payload["event_key"],
-            year=payload["year"],
+            schedule_year=payload["schedule_year"],
             scope=payload["scope"],
         )
         if span is None:
             raise ValueError(
                 f"Missing business calendar data for region={payload['region']}, "
-                f"event_key={payload['event_key']}, year={payload['year']}, scope={payload['scope']}"
+                f"event_key={payload['event_key']}, schedule_year={payload['schedule_year']}, "
+                f"scope={payload['scope']}"
             )
         if calendar_versions is not None:
             calendar_versions.add(version)
@@ -922,21 +924,21 @@ def eval_expr(
     if op == "enumerate_makeup_workdays":
         if business_calendar is None:
             raise ValueError("Business calendar is required for enumerate_makeup_workdays.")
-        version = business_calendar.calendar_version_for_year(
+        version = business_calendar.calendar_version_for_schedule_year(
             region=payload["region"],
-            year=payload["year"],
+            schedule_year=payload["schedule_year"],
         )
         if version is None:
             raise ValueError(
                 f"Missing business calendar data for region={payload['region']}, "
-                f"year={payload['year']}"
+                f"schedule_year={payload['schedule_year']}"
             )
         if calendar_versions is not None:
             calendar_versions.add(version)
         matched_dates = business_calendar.list_makeup_workdays(
             region=payload["region"],
             event_key=payload["event_key"],
-            year=payload["year"],
+            schedule_year=payload["schedule_year"],
         )
         return _dates_to_atomic_ranges(matched_dates, system_dt.tzinfo)
 
@@ -1191,24 +1193,19 @@ def _filter_calendar_dates(
     calendar_versions: set[str] | None = None,
 ) -> list[date]:
     dates = _iter_dates(base.start.date(), base.end.date())
-    years = sorted({d.year for d in dates})
-    missing_years = [
-        year for year in years if business_calendar.calendar_version_for_year(region=region, year=year) is None
-    ]
-    if missing_years:
-        raise ValueError(f"Missing business calendar data for region={region}, year={missing_years[0]}")
-    if calendar_versions is not None:
-        for year in years:
-            version = business_calendar.calendar_version_for_year(region=region, year=year)
-            if version is not None:
-                calendar_versions.add(version)
-
-    if day_kind == "workday":
-        return [d for d in dates if business_calendar.is_workday(region=region, d=d)]
-    if day_kind == "restday":
-        return [d for d in dates if not business_calendar.is_workday(region=region, d=d)]
-    if day_kind == "holiday":
-        return [d for d in dates if business_calendar.is_holiday(region=region, d=d)]
+    matched: list[date] = []
+    for d in dates:
+        status = business_calendar.get_day_status(region=region, d=d)
+        if calendar_versions is not None:
+            calendar_versions.update(status.calendar_versions)
+        if day_kind == "workday" and status.is_workday:
+            matched.append(d)
+        elif day_kind == "restday" and not status.is_workday:
+            matched.append(d)
+        elif day_kind == "holiday" and status.is_holiday:
+            matched.append(d)
+    if day_kind in {"workday", "restday", "holiday"}:
+        return matched
     raise ValueError(f"Unsupported calendar day kind: {day_kind}")
 
 

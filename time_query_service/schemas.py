@@ -71,7 +71,7 @@ class CalendarEventRangeExpr(StrictModel):
     op: Literal["calendar_event_range"]
     region: str = "CN"
     event_key: str
-    year: int
+    schedule_year: int
     scope: CalendarEventScope
 
 
@@ -105,7 +105,7 @@ class EnumerateMakeupWorkdaysExpr(StrictModel):
     op: Literal["enumerate_makeup_workdays"]
     region: str = "CN"
     event_key: str
-    year: int
+    schedule_year: int
 
 
 class CurrentHourExpr(StrictModel):

@@ -30,8 +30,9 @@
 - 子周期切片：支持“上个月前两周”“去年的前两个季度”这类大范围内部切片
 - 子周期选择：支持“上个月第一周”“今年第一周”“第一个季度的第一周”这类在大周期里选第 N 个小周期
 - 枚举组合：支持把枚举结果当作普通子表达式继续计算，并通过 `select_segment` / `segments_bounds` 显式转回单段区间
-- 节假日区间：支持 `calendar_event_range`，可解析“去年国庆假期”这类命名节假日范围
+- 节假日区间：支持 `calendar_event_range(region, event_key, schedule_year, scope)`，可解析“去年国庆假期”这类命名节假日范围
 - 业务日偏移：支持 `range_edge + business_day_offset`，可解析“节前最后一个工作日”这类表达
+- 中国业务日历：仓库内已提供 `CN/2022` 到 `CN/2026` 的 v2 schedule 数据；节假日/补班按 `schedule_year` 查询，工作日/休息日统计按实际日期上的 canonical day fact 求值
 
 ## 相关文档
 
@@ -203,6 +204,11 @@ curl -X POST http://127.0.0.1:8000/query/parse \
 - `select_segment(last, enumerate_makeup_workdays(...))` 可表示“春节调休补班最后一天”
 - `segments_bounds(reference(t1))` 可把一个多段结果显式压成 covering range
 - `reference` 不再要求只能引用前面字段，resolver 会按依赖关系求值
+
+业务日历相关的 hand-written DSL 现在统一使用 `schedule_year`：
+
+- `calendar_event_range(region="CN", event_key="national_day", schedule_year=2025, scope="consecutive_rest")`
+- `enumerate_makeup_workdays(region="CN", event_key="spring_festival", schedule_year=2025)`
 
 ### 2. resolve
 
