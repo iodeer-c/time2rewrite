@@ -1,6 +1,6 @@
 # Time Query Service
 
-一个基于 FastAPI、LangChain 和 DashScope Qwen 的时间字段解析服务，当前聚焦一件事：
+一个基于 FastAPI、LangChain 和可配置 OpenAI-compatible LLM 的时间字段解析服务，当前聚焦一件事：
 
 - `LLM-1`：为回答问题生成 0 个到多个下游可执行时间字段
 - `Code`：把每个时间字段求值成绝对时间区间
@@ -51,14 +51,65 @@
 cp .env.example .env
 ```
 
-然后编辑 `.env`：
+当前 LLM 契约分成两层：
+
+- `config/llm.yaml`：声明 `parser` / `rewriter` 两个 role 使用什么 provider、model、base URL 和额外参数
+- `.env`：提供 `api_key_env` / `proxy_url_env` 指向的真实值；如果某个 role 在 YAML 里同时写了环境变量名和写死值，运行时会优先取环境变量，取不到再回退到 YAML 中的写死值
+
+默认的 [`config/llm.yaml`](/Users/td/PycharmProjects/time2rewirte/config/llm.yaml) 已经提供了一个 Qwen/DashScope 的 OpenAI-compatible 示例。然后编辑 `.env`：
 
 ```env
-DASHSCOPE_API_KEY=your-dashscope-api-key
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_MODEL_NAME=qwen3.6-plus
+PARSER_API_KEY=your-llm-api-key
+REWRITER_API_KEY=your-llm-api-key
+PARSER_PROXY_URL=
+REWRITER_PROXY_URL=
 BUSINESS_CALENDAR_ROOT=config/business_calendar
 ```
+
+如果你想直接在 YAML 里写死密钥，也可以把 `config/llm.yaml` 里的某个 role 改成：
+
+```yaml
+roles:
+  parser:
+    model_type: openai
+    model_name: qwen3.6-plus
+    api_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: PARSER_API_KEY
+    api_key: your-inline-api-key
+    proxy_url_env: PARSER_PROXY_URL
+    proxy_url: http://127.0.0.1:7890
+    verify_ssl: false
+    additional_params:
+      temperature: 0
+      stream_usage: true
+      extra_body:
+        enable_thinking: false
+```
+
+如果你需要代理，直接在对应 role 下配置：
+
+- `proxy_url_env`：代理地址环境变量名
+- `proxy_url`：写死的代理地址，作为回退值
+- `verify_ssl`：是否校验证书，默认 `true`
+
+例如：
+
+```yaml
+roles:
+  parser:
+    proxy_url_env: PARSER_PROXY_URL
+    proxy_url: http://127.0.0.1:7890
+    verify_ssl: false
+```
+
+当前代理注入覆盖 `openai`、`tongyi`、`azure` 这几条创建路径。
+
+工厂当前支持的 `model_type` 包括：
+
+- `openai`
+- `tongyi`
+- `azure`
+- `vllm`
 
 如果还没有虚拟环境：
 
@@ -344,24 +395,52 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 
 ## 实现说明
 
-- `parse` 和 `rewrite` 依赖 DashScope/Qwen
+- `parse` 和 `rewrite` 依赖平台级 `LLMConfig + LLMFactory`
+- 默认示例配置使用 DashScope/Qwen 的 OpenAI-compatible 接口
 - `resolve` 只走本地确定性代码，不依赖 LLM
 - 通义千问不支持 OpenAI Structured Outputs，所以 parser 走“提示词约束 JSON + 服务端提取与校验”
 
 ## 常见问题
 
-### 缺少 `DASHSCOPE_API_KEY`
+### 缺少 LLM 配置文件
 
-如果 `parse` 或 `rewrite` 初始化时报：
+如果服务初始化 LLM 时提示：
 
 ```text
-Missing DASHSCOPE_API_KEY
+Missing LLM config file
 ```
 
 确认：
 
-- `.env` 已填写真实 key
+- [`config/llm.yaml`](/Users/td/PycharmProjects/time2rewirte/config/llm.yaml) 存在
 - 服务是在项目根目录启动的
+
+### 缺少 role 的 API Key
+
+如果 `parse` 或 `rewrite` 初始化时报：
+
+```text
+Missing API key for role=parser
+```
+
+或：
+
+```text
+Missing API key for role=rewriter
+```
+
+确认：
+
+- `.env` 已填写 `config/llm.yaml` 中对应 `api_key_env` 的真实值
+- 或者对应 role 的 `api_key` 已直接写在 YAML 中
+
+### 代理不生效
+
+如果你已经配置了代理但请求仍然直连，确认：
+
+- `.env` 已填写 `config/llm.yaml` 中对应 `proxy_url_env` 的值，或者 YAML 里的 `proxy_url` 非空
+- 修改代理配置后已重启服务
+- 当前 `model_type` 是 `openai`、`tongyi` 或 `azure`
 
 ### IDE 调试接口
 

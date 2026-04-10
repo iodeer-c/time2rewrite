@@ -4,10 +4,8 @@ import json
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
-from time_query_service.config import get_llm_config
 from time_query_service.schemas import ParsedTimeExpressions
 
 
@@ -793,32 +791,17 @@ class QueryParser:
     def __init__(
         self,
         *,
-        model: str | None = None,
-        temperature: float = 0,
         text_runner: Any | None = None,
-        llm: ChatOpenAI | None = None,
+        llm: Any | None = None,
     ) -> None:
-        self.model = model
-        self.temperature = temperature
         self._text_runner = text_runner
         self._llm = llm
 
-    def _get_llm(self) -> ChatOpenAI:
-        if self._llm is None:
-            config = get_llm_config()
-            if not config.api_key:
-                raise RuntimeError("Missing DASHSCOPE_API_KEY. Set it in .env or your shell environment.")
-            self._llm = ChatOpenAI(
-                model=self.model or config.model_name,
-                temperature=self.temperature,
-                api_key=config.api_key,
-                base_url=config.base_url,
-            )
-        return self._llm
-
     def _get_text_runner(self) -> Any:
         if self._text_runner is None:
-            self._text_runner = self._get_llm()
+            if self._llm is None:
+                raise RuntimeError("QueryParser requires an injected llm or text_runner.")
+            self._text_runner = self._llm
         return self._text_runner
 
     def parse_query_with_llm(self, *, query: str, system_date: str, timezone: str) -> ParsedTimeExpressions:
@@ -1007,5 +990,9 @@ class QueryParser:
 
 
 def parse_query_with_llm(query: str, system_date: str, timezone: str) -> ParsedTimeExpressions:
-    parser = QueryParser()
-    return parser.parse_query_with_llm(query=query, system_date=system_date, timezone=timezone)
+    from time_query_service.service import QueryPipelineService
+
+    service = QueryPipelineService()
+    return ParsedTimeExpressions.model_validate(
+        service.parse_query(query=query, system_date=system_date, timezone=timezone)
+    )

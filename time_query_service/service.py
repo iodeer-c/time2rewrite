@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from time_query_service.business_calendar import BusinessCalendarPort
+from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
 from time_query_service.parser import QueryParser
 from time_query_service.rewriter import QueryRewriter
 from time_query_service.schemas import ParsedTimeExpressions
@@ -16,22 +18,38 @@ class QueryPipelineService:
         parser: Any | None = None,
         rewriter: Any | None = None,
         business_calendar: BusinessCalendarPort | None = None,
+        llm_runtime_config: LLMRuntimeConfig | None = None,
+        llm_config_path: Path | None = None,
     ) -> None:
         self._parser = parser
         self._rewriter = rewriter
         self._business_calendar = business_calendar
+        self._llm_runtime_config = llm_runtime_config
+        self._llm_config_path = llm_config_path
 
     @property
     def parser(self) -> Any:
         if self._parser is None:
-            self._parser = QueryParser()
+            self._parser = QueryParser(llm=self._create_role_llm("parser"))
         return self._parser
 
     @property
     def rewriter(self) -> Any:
         if self._rewriter is None:
-            self._rewriter = QueryRewriter()
+            self._rewriter = QueryRewriter(llm=self._create_role_llm("rewriter"))
         return self._rewriter
+
+    def _get_llm_runtime_config(self) -> LLMRuntimeConfig:
+        if self._llm_runtime_config is None:
+            self._llm_runtime_config = load_llm_runtime_config(config_path=self._llm_config_path)
+        return self._llm_runtime_config
+
+    def _create_role_llm(self, role: str) -> Any:
+        config = self._get_llm_runtime_config().get_role_config(role)
+        try:
+            return LLMFactory.create_llm(config)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to create LLM for role={role}: {exc}") from exc
 
     def parse_query(self, *, query: str, system_date: str, timezone: str) -> dict[str, Any]:
         parsed = self.parser.parse_query_with_llm(query=query, system_date=system_date, timezone=timezone)
