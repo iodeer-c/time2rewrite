@@ -8,6 +8,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from time_query_service.schemas import ResolvedTimeExpressions
 
+HOUR_ENUMERATION_MARKERS = ("每小时", "各小时", "逐小时")
+
 
 REWRITER_SYSTEM_PROMPT = """你是一个查询改写器。
 
@@ -22,6 +24,9 @@ REWRITER_SYSTEM_PROMPT = """你是一个查询改写器。
 
 改写规则：
 - 如果某个时间表达的 start_time 和 end_time 在同一天，优先改写成“YYYY年M月D日”
+- 如果某个时间表达恰好覆盖同一天内的单个完整小时，优先改写成“YYYY年M月D日14点”
+- 如果某个时间表达恰好覆盖同一天内连续完整小时范围，优先改写成“YYYY年M月D日14点到15点”
+- 如果某个时间表达不是整日，也不是完整整点小时范围，必须改写成带时分秒的区间，例如“YYYY年M月D日14:37:00至YYYY年M月D日15:12:00”
 - 如果某个时间表达覆盖多天，优先改写成“YYYY年M月D日至YYYY年M月D日”
 - 如果 resolved_time_expressions 只有 1 个，把它改写成单时间窗口问题
 - 如果有多个时间字段，把它们改写成多时间窗口问题，并按输入顺序依次改写
@@ -124,6 +129,36 @@ resolved_time_expressions:
 - end_time: 2026-04-05 23:59:59
 - timezone: Asia/Shanghai
 输出：2026年4月5日的收益是多少
+
+示例9
+原问题：今天14点的收益是多少
+resolved_time_expressions:
+- id: t1
+- text: 今天14点
+- start_time: 2026-04-10 14:00:00
+- end_time: 2026-04-10 14:59:59
+- timezone: Asia/Shanghai
+输出：2026年4月10日14点的收益是多少
+
+示例10
+原问题：今天前2小时的收益是多少
+resolved_time_expressions:
+- id: t1
+- text: 今天前2小时
+- start_time: 2026-04-10 14:00:00
+- end_time: 2026-04-10 15:59:59
+- timezone: Asia/Shanghai
+输出：2026年4月10日14点到15点的收益是多少
+
+示例11
+原问题：最近24小时的收益是多少
+resolved_time_expressions:
+- id: t1
+- text: 最近24小时
+- start_time: 2026-04-09 14:37:00
+- end_time: 2026-04-10 14:37:00
+- timezone: Asia/Shanghai
+输出：2026年4月9日14:37:00至2026年4月10日14:37:00的收益是多少
 """
 
 
@@ -142,6 +177,7 @@ def build_rewriter_user_prompt(original_query: str, resolved_time_expressions: R
                     f"  start_time: {item.start_time}",
                     f"  end_time: {item.end_time}",
                     f"  timezone: {item.timezone}",
+                    f"  is_partial: {item.is_partial}",
                 ]
             )
     if resolved_time_expressions.metadata is not None:
@@ -159,12 +195,42 @@ def _format_date(dt: datetime) -> str:
     return f"{dt.year}年{dt.month}月{dt.day}日"
 
 
+def _format_datetime(dt: datetime) -> str:
+    return f"{_format_date(dt)}{dt.strftime('%H:%M:%S')}"
+
+
+def _is_full_day_range(start: datetime, end: datetime) -> bool:
+    return start == start.replace(hour=0, minute=0, second=0, microsecond=0) and end == end.replace(
+        hour=23,
+        minute=59,
+        second=59,
+        microsecond=0,
+    )
+
+
+def _is_hour_aligned_range(start: datetime, end: datetime) -> bool:
+    return (
+        start.minute == 0
+        and start.second == 0
+        and start.microsecond == 0
+        and end.minute == 59
+        and end.second == 59
+        and end.microsecond == 0
+    )
+
+
 def _format_range(start_time: str, end_time: str) -> str:
     start = _parse_resolved_time(start_time)
     end = _parse_resolved_time(end_time)
-    if start.date() == end.date():
-        return _format_date(start)
-    return f"{_format_date(start)}至{_format_date(end)}"
+    if _is_full_day_range(start, end):
+        if start.date() == end.date():
+            return _format_date(start)
+        return f"{_format_date(start)}至{_format_date(end)}"
+    if start.date() == end.date() and _is_hour_aligned_range(start, end):
+        if start.hour == end.hour:
+            return f"{_format_date(start)}{start.hour}点"
+        return f"{_format_date(start)}{start.hour}点到{end.hour}点"
+    return f"{_format_datetime(start)}至{_format_datetime(end)}"
 
 
 def _extract_calendar_day_label(source_text: str) -> str:
@@ -177,11 +243,103 @@ def _extract_calendar_day_label(source_text: str) -> str:
     return source_text
 
 
+def _is_hour_enumeration_source(text: str) -> bool:
+    return any(marker in text for marker in HOUR_ENUMERATION_MARKERS)
+
+
+def _is_hour_segment(start: datetime, end: datetime) -> bool:
+    if _is_full_day_range(start, end):
+        return False
+    return start.date() == end.date() and (end - start).total_seconds() <= 3599
+
+
+def _format_hour_segment_for_list(start: datetime, end: datetime, *, include_date: bool) -> str:
+    if _is_hour_aligned_range(start, end):
+        if include_date:
+            return f"{_format_date(start)}{start.hour}点"
+        return f"{start.hour}点"
+    if start.date() == end.date():
+        start_text = start.strftime("%H:%M:%S")
+        end_text = end.strftime("%H:%M:%S")
+        if include_date:
+            return f"{_format_date(start)}{start_text}至{end_text}"
+        return f"{start_text}至{end_text}"
+    return f"{_format_datetime(start)}至{_format_datetime(end)}"
+
+
+def _ensure_plural_hour_question(query: str) -> str:
+    if "分别" in query or "各自" in query:
+        return query
+    for source, target in (
+        ("是多少？", "分别是多少？"),
+        ("是多少?", "分别是多少?"),
+        ("是多少", "分别是多少"),
+        ("是什么？", "分别是什么？"),
+        ("是什么?", "分别是什么?"),
+        ("是什么", "分别是什么"),
+        ("有多少？", "分别有多少？"),
+        ("有多少?", "分别有多少?"),
+        ("有多少", "分别有多少"),
+    ):
+        if source in query:
+            return query.replace(source, target, 1)
+    return query
+
+
+def _rewrite_enumerated_hours(
+    *,
+    original_query: str,
+    resolved: ResolvedTimeExpressions,
+) -> str | None:
+    grouped: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+    for item in resolved.resolved_time_expressions:
+        if item.source_id is None:
+            continue
+        source_text = item.source_text or item.text
+        if not (_is_hour_enumeration_source(source_text) or _is_hour_enumeration_source(original_query)):
+            continue
+        start = _parse_resolved_time(item.start_time)
+        end = _parse_resolved_time(item.end_time)
+        if not _is_hour_segment(start, end):
+            return None
+        group = grouped.setdefault(
+            item.source_id,
+            {
+                "source_text": source_text,
+                "segments": [],
+            },
+        )
+        group["segments"].append((start, end))
+
+    if not grouped:
+        return None
+
+    rewritten = original_query
+    for group in grouped.values():
+        labels: list[str] = []
+        last_date = None
+        for start, end in group["segments"]:
+            include_date = start.date() != last_date
+            labels.append(_format_hour_segment_for_list(start, end, include_date=include_date))
+            last_date = start.date()
+        source_text = group["source_text"]
+        replacement = "、".join(labels)
+        updated = rewritten.replace(source_text, replacement, 1)
+        if updated == rewritten:
+            return None
+        rewritten = updated
+
+    return _ensure_plural_hour_question(rewritten)
+
+
 def _rewrite_enumerated_calendar_days(
     *,
     original_query: str,
     resolved: ResolvedTimeExpressions,
 ) -> str | None:
+    if resolved.metadata is None or resolved.metadata.enumerated_counts is None:
+        return None
+
     grouped: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
     has_enumerated_segments = False
 
@@ -236,6 +394,13 @@ class QueryRewriter:
         resolved = ResolvedTimeExpressions.model_validate(resolved_time_expressions)
         if not resolved.resolved_time_expressions:
             return original_query
+
+        enumerated_hour_rewrite = _rewrite_enumerated_hours(
+            original_query=original_query,
+            resolved=resolved,
+        )
+        if enumerated_hour_rewrite is not None:
+            return enumerated_hour_rewrite
 
         enumerated_rewrite = _rewrite_enumerated_calendar_days(
             original_query=original_query,

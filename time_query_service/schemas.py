@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
@@ -11,8 +12,9 @@ class StrictModel(BaseModel):
 
 TimeUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
 SliceMode = Literal["first", "last"]
-SliceUnit = Literal["day", "week", "month", "quarter"]
-SelectSubperiodUnit = Literal["day", "week", "month", "quarter", "half_year"]
+SliceUnit = Literal["day", "week", "month", "quarter", "year"]
+SelectSubperiodUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
+EnumerateSubperiodUnit = SelectSubperiodUnit
 CalendarEventScope = Literal["consecutive_rest", "statutory"]
 RangeEdge = Literal["start", "end"]
 CalendarDayKind = Literal["workday", "restday", "holiday"]
@@ -40,6 +42,17 @@ class RollingExpr(StrictModel):
     unit: TimeUnit
     value: int = Field(ge=1)
     anchor: Literal["system_date"]
+
+
+class RollingHoursExpr(StrictModel):
+    op: Literal["rolling_hours"]
+    value: int = Field(ge=1)
+
+
+class BoundedRangeExpr(StrictModel):
+    op: Literal["bounded_range"]
+    start: "Expr"
+    end: "Expr"
 
 
 class CalendarEventRangeExpr(StrictModel):
@@ -83,6 +96,28 @@ class EnumerateMakeupWorkdaysExpr(StrictModel):
     year: int
 
 
+class CurrentHourExpr(StrictModel):
+    op: Literal["current_hour"]
+
+
+class SelectHourExpr(StrictModel):
+    op: Literal["select_hour"]
+    hour: int = Field(ge=0, le=23)
+    base: "Expr"
+
+
+class SliceHoursExpr(StrictModel):
+    op: Literal["slice_hours"]
+    mode: SliceMode
+    count: int = Field(ge=1, le=24)
+    base: "Expr"
+
+
+class EnumerateHoursExpr(StrictModel):
+    op: Literal["enumerate_hours"]
+    base: "Expr"
+
+
 class SelectWeekdayExpr(StrictModel):
     op: Literal["select_weekday"]
     weekday: int = Field(ge=1, le=7)
@@ -116,6 +151,12 @@ class SelectSubperiodExpr(StrictModel):
     op: Literal["select_subperiod"]
     unit: SelectSubperiodUnit
     index: int = Field(ge=1)
+    base: "Expr"
+
+
+class EnumerateSubperiodsExpr(StrictModel):
+    op: Literal["enumerate_subperiods"]
+    unit: EnumerateSubperiodUnit
     base: "Expr"
 
 
@@ -157,17 +198,24 @@ Expr = Annotated[
     | CurrentPeriodExpr
     | ShiftExpr
     | RollingExpr
+    | RollingHoursExpr
+    | BoundedRangeExpr
     | CalendarEventRangeExpr
     | RangeEdgeExpr
     | BusinessDayOffsetExpr
     | EnumerateCalendarDaysExpr
     | EnumerateMakeupWorkdaysExpr
+    | CurrentHourExpr
+    | SelectHourExpr
+    | SliceHoursExpr
+    | EnumerateHoursExpr
     | SelectWeekdayExpr
     | SelectWeekendExpr
     | SelectMonthExpr
     | SelectQuarterExpr
     | SelectHalfYearExpr
     | SelectSubperiodExpr
+    | EnumerateSubperiodsExpr
     | SelectOccurrenceExpr
     | ReferenceExpr
     | SliceSubperiodsExpr,
@@ -175,16 +223,21 @@ Expr = Annotated[
 ]
 
 ShiftExpr.model_rebuild()
+BoundedRangeExpr.model_rebuild()
 RangeEdgeExpr.model_rebuild()
 BusinessDayOffsetExpr.model_rebuild()
 EnumerateCalendarDaysExpr.model_rebuild()
 EnumerateMakeupWorkdaysExpr.model_rebuild()
+SelectHourExpr.model_rebuild()
+SliceHoursExpr.model_rebuild()
+EnumerateHoursExpr.model_rebuild()
 SelectWeekdayExpr.model_rebuild()
 SelectWeekendExpr.model_rebuild()
 SelectMonthExpr.model_rebuild()
 SelectQuarterExpr.model_rebuild()
 SelectHalfYearExpr.model_rebuild()
 SelectSubperiodExpr.model_rebuild()
+EnumerateSubperiodsExpr.model_rebuild()
 SelectOccurrenceExpr.model_rebuild()
 SliceSubperiodsExpr.model_rebuild()
 
@@ -217,6 +270,7 @@ class ResolvedTimeExpression(StrictModel):
     start_time: str
     end_time: str
     timezone: str
+    is_partial: bool | None = None
 
 
 class ResolvedMetadata(StrictModel):
@@ -229,16 +283,35 @@ class ResolvedTimeExpressions(StrictModel):
     metadata: ResolvedMetadata | None = None
 
 
-class ParseQueryRequest(StrictModel):
+class TemporalContextRequest(StrictModel):
+    system_date: str | None = None
+    system_datetime: str | None = None
+    timezone: str = "Asia/Shanghai"
+
+    @model_validator(mode="after")
+    def validate_temporal_context(self) -> "TemporalContextRequest":
+        if self.system_datetime is None:
+            if self.system_date is None:
+                raise ValueError("system_date is required when system_datetime is omitted")
+            return self
+
+        try:
+            parsed_datetime = datetime.strptime(self.system_datetime, "%Y-%m-%d %H:%M:%S")
+        except ValueError as exc:
+            raise ValueError("system_datetime must use format YYYY-MM-DD HH:MM:SS") from exc
+
+        if self.system_date is not None and self.system_date != parsed_datetime.strftime("%Y-%m-%d"):
+            raise ValueError("system_date must match the date portion of system_datetime")
+
+        return self
+
+
+class ParseQueryRequest(TemporalContextRequest):
     query: str
-    system_date: str
-    timezone: str = "Asia/Shanghai"
 
 
-class ResolveQueryRequest(StrictModel):
+class ResolveQueryRequest(TemporalContextRequest):
     parsed_time_expressions: ParsedTimeExpressions
-    system_date: str
-    timezone: str = "Asia/Shanghai"
 
 
 class RewriteQueryRequest(StrictModel):
@@ -250,10 +323,8 @@ class RewriteQueryResponse(StrictModel):
     rewritten_query: str
 
 
-class PipelineRequest(StrictModel):
+class PipelineRequest(TemporalContextRequest):
     query: str
-    system_date: str
-    timezone: str = "Asia/Shanghai"
     rewrite: bool = False
 
 

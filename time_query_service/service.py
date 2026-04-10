@@ -51,14 +51,37 @@ class QueryPipelineService:
         except Exception as exc:
             raise RuntimeError(f"Failed to create LLM for role={role}: {exc}") from exc
 
-    def parse_query(self, *, query: str, system_date: str, timezone: str) -> dict[str, Any]:
-        parsed = self.parser.parse_query_with_llm(query=query, system_date=system_date, timezone=timezone)
+    def parse_query(
+        self,
+        *,
+        query: str,
+        system_date: str | None = None,
+        system_datetime: str | None = None,
+        timezone: str = "Asia/Shanghai",
+    ) -> dict[str, Any]:
+        parser_kwargs: dict[str, Any] = {
+            "query": query,
+            "timezone": timezone,
+        }
+        if system_date is not None:
+            parser_kwargs["system_date"] = system_date
+        if system_datetime is not None:
+            parser_kwargs["system_datetime"] = system_datetime
+        parsed = self.parser.parse_query_with_llm(**parser_kwargs)
         return ParsedTimeExpressions.model_validate(parsed).model_dump(mode="python")
 
-    def resolve_query(self, *, parsed_time_expressions: dict[str, Any], system_date: str, timezone: str) -> dict[str, Any]:
+    def resolve_query(
+        self,
+        *,
+        parsed_time_expressions: dict[str, Any],
+        system_date: str | None = None,
+        system_datetime: str | None = None,
+        timezone: str = "Asia/Shanghai",
+    ) -> dict[str, Any]:
         return resolve_query(
             parsed_time_expressions=parsed_time_expressions,
             system_date=system_date,
+            system_datetime=system_datetime,
             timezone=timezone,
             business_calendar=self._business_calendar,
         )
@@ -73,14 +96,21 @@ class QueryPipelineService:
         self,
         *,
         query: str,
-        system_date: str,
-        timezone: str,
+        system_date: str | None = None,
+        system_datetime: str | None = None,
+        timezone: str = "Asia/Shanghai",
         rewrite: bool = False,
     ) -> dict[str, Any]:
-        parsed = self.parse_query(query=query, system_date=system_date, timezone=timezone)
+        parsed = self.parse_query(
+            query=query,
+            system_date=system_date,
+            system_datetime=system_datetime,
+            timezone=timezone,
+        )
         resolved = self.resolve_query(
             parsed_time_expressions=parsed,
             system_date=system_date,
+            system_datetime=system_datetime,
             timezone=timezone,
         )
         rewritten = (

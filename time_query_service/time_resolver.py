@@ -17,6 +17,12 @@ class TimeRange:
     start: datetime
     end: datetime
     grain: str | None = None
+    slicing_grain: str | None = None
+    is_partial: bool | None = None
+
+    @property
+    def subperiod_parent_grain(self) -> str | None:
+        return self.slicing_grain or self.grain
 
 
 def start_of_day(dt: datetime) -> datetime:
@@ -25,6 +31,14 @@ def start_of_day(dt: datetime) -> datetime:
 
 def end_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=23, minute=59, second=59, microsecond=0)
+
+
+def start_of_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def end_of_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=59, second=59, microsecond=0)
 
 
 def current_period(system_dt: datetime, unit: str) -> TimeRange:
@@ -66,6 +80,14 @@ def current_period(system_dt: datetime, unit: str) -> TimeRange:
     raise ValueError(f"Unsupported unit: {unit}")
 
 
+def current_hour(system_dt: datetime) -> TimeRange:
+    return TimeRange(start_of_hour(system_dt), end_of_hour(system_dt), grain="hour")
+
+
+def rolling_hours_range(system_dt: datetime, value: int) -> TimeRange:
+    return TimeRange(system_dt - timedelta(hours=value), system_dt, grain=None, slicing_grain="rolling_hours")
+
+
 def add_months(dt: datetime, months: int) -> datetime:
     year = dt.year + (dt.month - 1 + months) // 12
     month = (dt.month - 1 + months) % 12 + 1
@@ -85,23 +107,47 @@ def shift_month_like(base: TimeRange, months: int) -> TimeRange:
     end_candidate = add_months(base.end, months)
     end_day = calendar.monthrange(end_candidate.year, end_candidate.month)[1]
     end = end_candidate.replace(day=end_day, hour=23, minute=59, second=59, microsecond=0)
-    return TimeRange(start, end, grain=base.grain)
+    return TimeRange(
+        start,
+        end,
+        grain=base.grain,
+        slicing_grain=base.slicing_grain,
+        is_partial=base.is_partial,
+    )
 
 
 def shift_year_like(base: TimeRange, years: int) -> TimeRange:
     start = add_years(base.start, years)
     end = add_years(base.end, years)
-    return TimeRange(start, end, grain=base.grain)
+    return TimeRange(
+        start,
+        end,
+        grain=base.grain,
+        slicing_grain=base.slicing_grain,
+        is_partial=base.is_partial,
+    )
 
 
 def shift_range(base: TimeRange, unit: str, value: int) -> TimeRange:
     if unit == "day":
         delta = timedelta(days=value)
-        return TimeRange(base.start + delta, base.end + delta, grain=base.grain)
+        return TimeRange(
+            base.start + delta,
+            base.end + delta,
+            grain=base.grain,
+            slicing_grain=base.slicing_grain,
+            is_partial=base.is_partial,
+        )
 
     if unit == "week":
         delta = timedelta(weeks=value)
-        return TimeRange(base.start + delta, base.end + delta, grain=base.grain)
+        return TimeRange(
+            base.start + delta,
+            base.end + delta,
+            grain=base.grain,
+            slicing_grain=base.slicing_grain,
+            is_partial=base.is_partial,
+        )
 
     if unit == "month":
         return shift_month_like(base, value)
@@ -127,29 +173,35 @@ def rolling_range(system_dt: datetime, unit: str, value: int) -> TimeRange:
 
     if unit == "day":
         start_date = add_days(system_dt, -(value - 1))
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     if unit == "week":
         start_date = add_days(system_dt, -(value * 7) + 1)
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     if unit == "month":
         start_date = add_days(add_months(system_dt, -value), 1)
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     if unit == "quarter":
         start_date = add_days(add_months(system_dt, -(value * 3)), 1)
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     if unit == "half_year":
         start_date = add_days(add_months(system_dt, -(value * 6)), 1)
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     if unit == "year":
         start_date = add_days(add_years(system_dt, -value), 1)
-        return TimeRange(start_of_day(start_date), end, grain=None)
+        return TimeRange(start_of_day(start_date), end, grain=None, slicing_grain=unit)
 
     raise ValueError(f"Unsupported rolling unit: {unit}")
+
+
+def bounded_range(start: TimeRange, end: TimeRange) -> TimeRange:
+    if start.start > end.end:
+        raise ValueError("bounded_range start must be on or before end.")
+    return TimeRange(start.start, end.end, grain=None, slicing_grain="bounded_range")
 
 
 def _normalize_expr(expr: Any) -> dict[str, Any]:
@@ -183,9 +235,19 @@ def _natural_half_year_range(year: int, half: int, tzinfo) -> TimeRange:
     return TimeRange(first, last, grain="half_year")
 
 
-def _validate_subperiod_request(base_grain: str | None, unit: str, count: int) -> None:
+def _validate_subperiod_request(base: TimeRange, unit: str, count: int) -> str:
+    base_grain = base.subperiod_parent_grain
     if base_grain is None:
         raise ValueError("Unsupported subperiod slicing: base range does not have a natural grain.")
+
+    if base.grain is None and base.slicing_grain is not None and base.slicing_grain != "bounded_range":
+        if unit == base.slicing_grain:
+            return base_grain
+
+    if base_grain == "bounded_range":
+        if unit not in {"day", "week", "month", "quarter", "half_year", "year"}:
+            raise ValueError(f"Unsupported subperiod slicing: {base_grain} -> {unit}")
+        return base_grain
 
     max_counts = get_slice_subperiod_max_counts()
     child_limits = max_counts.get(base_grain)
@@ -193,11 +255,12 @@ def _validate_subperiod_request(base_grain: str | None, unit: str, count: int) -
         raise ValueError(f"Unsupported subperiod slicing: {base_grain} -> {unit}")
 
     max_allowed = child_limits[unit]
-    if count > max_allowed:
+    if base.grain == base_grain and count > max_allowed:
         raise ValueError(
             f"Requested {count} {unit} subperiods from {base_grain}, "
             f"which exceeds configured maximum {max_allowed}."
         )
+    return base_grain
 
 
 def _split_by_days(base: TimeRange) -> list[TimeRange]:
@@ -225,8 +288,63 @@ def _split_by_weeks(base: TimeRange) -> list[TimeRange]:
     return parts
 
 
+def _natural_period_containing(dt: datetime, unit: str) -> TimeRange:
+    if unit == "day":
+        return TimeRange(start_of_day(dt), end_of_day(dt), grain="day")
+    if unit == "week":
+        return current_period(dt, "week")
+    if unit == "month":
+        return _natural_month_range(dt.year, dt.month, dt.tzinfo)
+    if unit == "quarter":
+        return _natural_quarter_range(dt.year, ((dt.month - 1) // 3) + 1, dt.tzinfo)
+    if unit == "half_year":
+        return _natural_half_year_range(dt.year, 1 if dt.month <= 6 else 2, dt.tzinfo)
+    if unit == "year":
+        return current_period(dt, "year")
+    raise ValueError(f"Unsupported unit: {unit}")
+
+
+def _next_natural_period_start(period_start: datetime, unit: str) -> datetime:
+    if unit == "day":
+        return period_start + timedelta(days=1)
+    if unit == "week":
+        return period_start + timedelta(days=7)
+    if unit == "month":
+        return add_months(period_start, 1).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if unit == "quarter":
+        return add_months(period_start, 3).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if unit == "half_year":
+        return add_months(period_start, 6).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if unit == "year":
+        return add_years(period_start, 1).replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    raise ValueError(f"Unsupported unit: {unit}")
+
+
+def _split_clipped_subperiods(base: TimeRange, unit: str) -> list[TimeRange]:
+    parts: list[TimeRange] = []
+    current = _natural_period_containing(base.start, unit)
+    while current.start <= base.end:
+        overlap_start = max(current.start, base.start)
+        overlap_end = min(current.end, base.end)
+        if overlap_start <= overlap_end:
+            is_partial = overlap_start != current.start or overlap_end != current.end
+            parts.append(
+                TimeRange(
+                    overlap_start,
+                    overlap_end,
+                    grain=None if is_partial else unit,
+                    is_partial=is_partial,
+                )
+            )
+        current = _natural_period_containing(_next_natural_period_start(current.start, unit), unit)
+    return parts
+
+
 def split_into_subperiods(base: TimeRange, unit: str) -> list[TimeRange]:
-    _validate_subperiod_request(base.grain, unit, 1)
+    _validate_subperiod_request(base, unit, 1)
+
+    if base.grain is None and base.slicing_grain is not None:
+        return _split_clipped_subperiods(base, unit)
 
     if base.grain == "week" and unit == "day":
         return _split_by_days(base)
@@ -277,29 +395,131 @@ def split_into_subperiods(base: TimeRange, unit: str) -> list[TimeRange]:
     raise ValueError(f"Unsupported subperiod slicing: {base.grain} -> {unit}")
 
 
+def _aggregate_partial_flag(parts: list[TimeRange]) -> bool | None:
+    partial_flags = [part.is_partial for part in parts if part.is_partial is not None]
+    if not partial_flags:
+        return None
+    return any(partial_flags)
+
+
+def _require_natural_day_base(base: TimeRange, op_name: str) -> None:
+    if base.grain != "day":
+        raise ValueError(f"{op_name} requires a natural day base, got {base.grain!r}.")
+    if base.start.date() != base.end.date():
+        raise ValueError(f"{op_name} requires a natural day base.")
+    if base.start != start_of_day(base.start) or base.end != end_of_day(base.start):
+        raise ValueError(f"{op_name} requires a natural day base.")
+
+
+def _require_single_day_base(base: TimeRange, op_name: str) -> None:
+    if base.start.date() != base.end.date():
+        raise ValueError(f"{op_name} requires a single-day base.")
+
+
+def _split_into_hours(base: TimeRange) -> list[TimeRange]:
+    _require_natural_day_base(base, "hour operation")
+    return [
+        TimeRange(
+            base.start + timedelta(hours=hour),
+            base.start + timedelta(hours=hour, minutes=59, seconds=59),
+            grain="hour",
+        )
+        for hour in range(24)
+    ]
+
+
+def _split_clipped_hours(base: TimeRange) -> list[TimeRange]:
+    parts: list[TimeRange] = []
+    cursor = start_of_hour(base.start)
+    while cursor <= base.end:
+        natural_start = start_of_hour(cursor)
+        natural_end = end_of_hour(cursor)
+        overlap_start = max(natural_start, base.start)
+        overlap_end = min(natural_end, base.end)
+        if overlap_start <= overlap_end:
+            is_partial = overlap_start != natural_start or overlap_end != natural_end
+            parts.append(
+                TimeRange(
+                    overlap_start,
+                    overlap_end,
+                    grain="hour" if not is_partial else None,
+                    is_partial=is_partial,
+                )
+            )
+        cursor = natural_start + timedelta(hours=1)
+    return parts
+
+
+def enumerate_hours_segments(base: TimeRange) -> list[TimeRange]:
+    if base.grain == "day":
+        return _split_into_hours(base)
+    return _split_clipped_hours(base)
+
+
+def select_hour_range(base: TimeRange, hour: int) -> TimeRange:
+    if base.grain == "day":
+        return _split_into_hours(base)[hour]
+    if base.grain is not None:
+        raise ValueError("select_hour requires a natural day base or a single-day bounded range.")
+
+    _require_single_day_base(base, "select_hour")
+    for part in _split_clipped_hours(base):
+        if start_of_hour(part.start).hour == hour:
+            return part
+    raise ValueError(f"select_hour could not find hour {hour} in base range.")
+
+
+def slice_hours_range(base: TimeRange, mode: str, count: int) -> TimeRange:
+    parts = _split_into_hours(base) if base.grain == "day" else _split_clipped_hours(base)
+    if count > len(parts):
+        raise ValueError(f"Requested {count} hours, but only {len(parts)} are available.")
+    selected = parts[:count] if mode == "first" else parts[-count:]
+    if not selected:
+        raise ValueError("No hours selected.")
+    if len(selected) == 1:
+        part = selected[0]
+        return TimeRange(
+            part.start,
+            part.end,
+            grain=part.grain,
+            is_partial=part.is_partial,
+        )
+    return TimeRange(
+        selected[0].start,
+        selected[-1].end,
+        grain=None,
+        is_partial=_aggregate_partial_flag(selected),
+    )
+
+
 def slice_subperiods_range(base: TimeRange, mode: str, unit: str, count: int) -> TimeRange:
-    _validate_subperiod_request(base.grain, unit, count)
+    base_grain = _validate_subperiod_request(base, unit, count)
     parts = split_into_subperiods(base, unit)
 
     if count > len(parts):
         raise ValueError(
-            f"Requested {count} {unit} subperiods from {base.grain}, but only {len(parts)} are available."
+            f"Requested {count} {unit} subperiods from {base_grain}, but only {len(parts)} are available."
         )
 
     selected = parts[:count] if mode == "first" else parts[-count:]
     if not selected:
         raise ValueError("No subperiods selected.")
 
-    return TimeRange(selected[0].start, selected[-1].end, grain=None)
+    return TimeRange(
+        selected[0].start,
+        selected[-1].end,
+        grain=None,
+        is_partial=_aggregate_partial_flag(selected),
+    )
 
 
 def select_subperiod_range(base: TimeRange, unit: str, index: int) -> TimeRange:
-    _validate_subperiod_request(base.grain, unit, index)
+    base_grain = _validate_subperiod_request(base, unit, index)
     parts = split_into_subperiods(base, unit)
 
     if index > len(parts):
         raise ValueError(
-            f"Requested subperiod index {index} for {base.grain} -> {unit}, "
+            f"Requested subperiod index {index} for {base_grain} -> {unit}, "
             f"but only {len(parts)} subperiods are available."
         )
 
@@ -444,6 +664,7 @@ def eval_expr(
     business_calendar: BusinessCalendarPort | None = None,
     calendar_versions: set[str] | None = None,
     rolling_anchor_dt: datetime | None = None,
+    system_has_time: bool = False,
 ) -> TimeRange:
     payload = _normalize_expr(expr)
     op = payload["op"]
@@ -454,6 +675,16 @@ def eval_expr(
     if op == "current_period":
         return current_period(system_dt, payload["unit"])
 
+    if op == "current_hour":
+        if not system_has_time:
+            raise ValueError("current_hour requires system_datetime.")
+        return current_hour(system_dt)
+
+    if op == "rolling_hours":
+        if not system_has_time:
+            raise ValueError("rolling_hours requires system_datetime.")
+        return rolling_hours_range(system_dt, payload["value"])
+
     if op == "shift":
         base = eval_expr(
             payload["base"],
@@ -462,11 +693,33 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return shift_range(base, payload["unit"], payload["value"])
 
     if op == "rolling":
         return rolling_range(rolling_anchor_dt or system_dt, payload["unit"], payload["value"])
+
+    if op == "bounded_range":
+        start = eval_expr(
+            payload["start"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+        )
+        end = eval_expr(
+            payload["end"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+        )
+        return bounded_range(start, end)
 
     if op == "calendar_event_range":
         if business_calendar is None:
@@ -500,6 +753,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return range_edge(base, payload["edge"])
 
@@ -513,6 +767,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return business_day_offset_range(
             base=base,
@@ -532,10 +787,41 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
 
     if op == "enumerate_makeup_workdays":
         raise ValueError("enumerate_makeup_workdays must be resolved via resolve_query.")
+
+    if op == "enumerate_hours":
+        raise ValueError("enumerate_hours must be resolved via resolve_query.")
+
+    if op == "enumerate_subperiods":
+        raise ValueError("enumerate_subperiods must be resolved via resolve_query.")
+
+    if op == "select_hour":
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+        )
+        return select_hour_range(base, payload["hour"])
+
+    if op == "slice_hours":
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+        )
+        return slice_hours_range(base, payload["mode"], payload["count"])
 
     if op == "slice_subperiods":
         base = eval_expr(
@@ -545,6 +831,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return slice_subperiods_range(base, payload["mode"], payload["unit"], payload["count"])
 
@@ -556,6 +843,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return select_subperiod_range(base, payload["unit"], payload["index"])
 
@@ -567,6 +855,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         _require_week_base(base, "select_weekday")
         target = base.start + timedelta(days=payload["weekday"] - 1)
@@ -580,6 +869,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         _require_week_base(base, "select_weekend")
         start = start_of_day(base.start + timedelta(days=5))
@@ -594,6 +884,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return select_occurrence_range(
             base,
@@ -610,6 +901,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         month = payload["month"]
         year = base.start.year
@@ -623,6 +915,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         quarter = payload["quarter"]
         year = base.start.year
@@ -636,6 +929,7 @@ def eval_expr(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         return _natural_half_year_range(base.start.year, payload["half"], base.start.tzinfo)
 
@@ -711,15 +1005,61 @@ def _merge_dates_to_ranges(dates: list[date], tzinfo) -> list[TimeRange]:
     return ranges
 
 
+def _build_resolved_item_payload(
+    *,
+    item_id: str,
+    text: str,
+    timezone: str,
+    resolved: TimeRange,
+    source_id: str | None,
+    source_text: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": item_id,
+        "text": text,
+        "source_id": source_id,
+        "source_text": source_text,
+        "start_time": resolved.start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": resolved.end.strftime("%Y-%m-%d %H:%M:%S"),
+        "timezone": timezone,
+    }
+    if resolved.is_partial is not None:
+        payload["is_partial"] = resolved.is_partial
+    return payload
+
+
+def _resolve_system_context(
+    *,
+    system_date: str | None,
+    system_datetime: str | None,
+    timezone: str,
+) -> tuple[datetime, bool]:
+    if system_datetime is not None:
+        parsed_datetime = datetime.strptime(system_datetime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo(timezone))
+        if system_date is not None and system_date != parsed_datetime.strftime("%Y-%m-%d"):
+            raise ValueError("system_date must match the date portion of system_datetime")
+        return parsed_datetime, True
+
+    if system_date is None:
+        raise ValueError("system_date is required when system_datetime is omitted")
+
+    return datetime.strptime(system_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone)), False
+
+
 def resolve_query(
     parsed_time_expressions: dict[str, Any] | ParsedTimeExpressions,
-    system_date: str,
-    timezone: str,
+    system_date: str | None = None,
+    system_datetime: str | None = None,
+    timezone: str = "Asia/Shanghai",
     business_calendar: BusinessCalendarPort | None = None,
     business_calendar_root: Path | None = None,
 ) -> dict[str, Any]:
     parsed = ParsedTimeExpressions.model_validate(parsed_time_expressions)
-    system_dt = datetime.strptime(system_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone))
+    system_dt, system_has_time = _resolve_system_context(
+        system_date=system_date,
+        system_datetime=system_datetime,
+        timezone=timezone,
+    )
     rolling_anchor_dt = system_dt if parsed.rolling_includes_today else system_dt - timedelta(days=1)
     if business_calendar is None:
         needs_business_calendar = any(_expr_uses_business_calendar(item.expr) for item in parsed.time_expressions)
@@ -741,6 +1081,7 @@ def resolve_query(
                 business_calendar=business_calendar,
                 calendar_versions=calendar_versions,
                 rolling_anchor_dt=rolling_anchor_dt,
+                system_has_time=system_has_time,
             )
             resolved_map[item.id] = base
             matched_dates = _filter_calendar_dates(
@@ -800,6 +1141,57 @@ def resolve_query(
                 )
             continue
 
+        if expr_payload["op"] == "enumerate_subperiods":
+            base = eval_expr(
+                expr_payload["base"],
+                system_dt,
+                resolved_map,
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+                rolling_anchor_dt=rolling_anchor_dt,
+                system_has_time=system_has_time,
+            )
+            resolved_map[item.id] = base
+            segments = split_into_subperiods(base, expr_payload["unit"])
+            for index, segment in enumerate(segments, start=1):
+                resolved_items.append(
+                    _build_resolved_item_payload(
+                        item_id=f"{item.id}__seg_{index:02d}",
+                        text=item.text,
+                        timezone=timezone,
+                        resolved=segment,
+                        source_id=item.id,
+                        source_text=item.text,
+                    )
+                )
+            continue
+
+        if expr_payload["op"] == "enumerate_hours":
+            base = eval_expr(
+                expr_payload["base"],
+                system_dt,
+                resolved_map,
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+                rolling_anchor_dt=rolling_anchor_dt,
+                system_has_time=system_has_time,
+            )
+            resolved_map[item.id] = base
+            segments = enumerate_hours_segments(base)
+            enumerated_counts[item.id] = len(segments)
+            for index, segment in enumerate(segments, start=1):
+                resolved_items.append(
+                    _build_resolved_item_payload(
+                        item_id=f"{item.id}__seg_{index:02d}",
+                        text=item.text,
+                        timezone=timezone,
+                        resolved=segment,
+                        source_id=item.id,
+                        source_text=item.text,
+                    )
+                )
+            continue
+
         resolved = eval_expr(
             item.expr,
             system_dt,
@@ -807,18 +1199,18 @@ def resolve_query(
             business_calendar=business_calendar,
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
         )
         resolved_map[item.id] = resolved
         resolved_items.append(
-            {
-                "id": item.id,
-                "text": item.text,
-                "source_id": None,
-                "source_text": None,
-                "start_time": resolved.start.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_time": resolved.end.strftime("%Y-%m-%d %H:%M:%S"),
-                "timezone": timezone,
-            }
+            _build_resolved_item_payload(
+                item_id=item.id,
+                text=item.text,
+                timezone=timezone,
+                resolved=resolved,
+                source_id=None,
+                source_text=None,
+            )
         )
 
     metadata = None
@@ -832,6 +1224,9 @@ def resolve_query(
         resolved_time_expressions=resolved_items,
         metadata=metadata,
     ).model_dump(mode="python", exclude_none=False)
+    for item in payload["resolved_time_expressions"]:
+        if item.get("is_partial") is None:
+            item.pop("is_partial", None)
     if payload.get("metadata") is None:
         payload.pop("metadata", None)
     else:

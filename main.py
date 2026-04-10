@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from time_query_service.business_calendar import JsonBusinessCalendar
 from time_query_service.config import get_business_calendar_root
@@ -45,20 +45,28 @@ def root() -> dict[str, str]:
 
 @app.post("/query/parse", response_model=ParsedTimeExpressions)
 def parse_query(request: ParseQueryRequest):
-    return query_service.parse_query(
-        query=request.query,
-        system_date=request.system_date,
-        timezone=request.timezone,
-    )
+    try:
+        return query_service.parse_query(
+            query=request.query,
+            system_date=request.system_date,
+            system_datetime=request.system_datetime,
+            timezone=request.timezone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/query/resolve", response_model=ResolvedTimeExpressions)
 def resolve_time_expressions(request: ResolveQueryRequest):
-    return query_service.resolve_query(
-        parsed_time_expressions=request.parsed_time_expressions.model_dump(mode="python"),
-        system_date=request.system_date,
-        timezone=request.timezone,
-    )
+    try:
+        return query_service.resolve_query(
+            parsed_time_expressions=request.parsed_time_expressions.model_dump(mode="python"),
+            system_date=request.system_date,
+            system_datetime=request.system_datetime,
+            timezone=request.timezone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/query/rewrite", response_model=RewriteQueryResponse)
@@ -72,9 +80,13 @@ def rewrite_query(request: RewriteQueryRequest):
 
 @app.post("/query/pipeline", response_model=PipelineResponse)
 def pipeline_query(request: PipelineRequest):
-    return query_service.process_query(
-        query=request.query,
-        system_date=request.system_date,
-        timezone=request.timezone,
-        rewrite=request.rewrite,
-    )
+    try:
+        return query_service.process_query(
+            query=request.query,
+            system_date=request.system_date,
+            system_datetime=request.system_datetime,
+            timezone=request.timezone,
+            rewrite=request.rewrite,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
