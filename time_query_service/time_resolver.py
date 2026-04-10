@@ -4,7 +4,7 @@ import calendar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from time_query_service.business_calendar import BusinessCalendarPort, JsonBusinessCalendar
@@ -23,6 +23,27 @@ class TimeRange:
     @property
     def subperiod_parent_grain(self) -> str | None:
         return self.slicing_grain or self.grain
+
+
+@dataclass(frozen=True)
+class TimeSegmentSet:
+    members: tuple[TimeRange, ...]
+
+    def __post_init__(self) -> None:
+        ordered = tuple(sorted(self.members, key=lambda item: (item.start, item.end)))
+        deduped: list[TimeRange] = []
+        for member in ordered:
+            if deduped:
+                previous = deduped[-1]
+                if member.start == previous.start and member.end == previous.end:
+                    continue
+                if member.start <= previous.end:
+                    raise ValueError("TimeSegmentSet members must not overlap.")
+            deduped.append(member)
+        object.__setattr__(self, "members", tuple(deduped))
+
+
+TemporalValue = TimeRange | TimeSegmentSet
 
 
 def start_of_day(dt: datetime) -> datetime:
@@ -202,6 +223,34 @@ def bounded_range(start: TimeRange, end: TimeRange) -> TimeRange:
     if start.start > end.end:
         raise ValueError("bounded_range start must be on or before end.")
     return TimeRange(start.start, end.end, grain=None, slicing_grain="bounded_range")
+
+
+def _segment_set(*members: TimeRange) -> TimeSegmentSet:
+    return TimeSegmentSet(tuple(members))
+
+
+def _flatten_temporal_value(value: TemporalValue) -> list[TimeRange]:
+    if isinstance(value, TimeRange):
+        return [value]
+    return list(value.members)
+
+
+def _require_time_range(value: TemporalValue, op_name: str) -> TimeRange:
+    if isinstance(value, TimeSegmentSet):
+        raise ValueError(f"{op_name} requires a single continuous range.")
+    return value
+
+
+def _map_segments(
+    value: TemporalValue,
+    fn: Callable[[TimeRange], TemporalValue],
+) -> TemporalValue:
+    if isinstance(value, TimeRange):
+        return fn(value)
+    parts: list[TimeRange] = []
+    for member in value.members:
+        parts.extend(_flatten_temporal_value(fn(member)))
+    return TimeSegmentSet(tuple(parts))
 
 
 def _normalize_expr(expr: Any) -> dict[str, Any]:
@@ -657,15 +706,55 @@ def _expr_uses_business_calendar(expr: Mapping[str, Any] | Any) -> bool:
     return False
 
 
+def _normalize_nested_expr_value(value: Any, default_include_anchor: bool) -> Any:
+    if hasattr(value, "model_dump") or isinstance(value, Mapping):
+        payload = _normalize_expr(value)
+        if "op" in payload:
+            return _normalize_legacy_rolling_expr(payload, default_include_anchor)
+        return {
+            key: _normalize_nested_expr_value(nested_value, default_include_anchor)
+            for key, nested_value in payload.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_nested_expr_value(item, default_include_anchor) for item in value]
+    return value
+
+
+def _normalize_legacy_rolling_expr(expr: Mapping[str, Any] | Any, default_include_anchor: bool) -> dict[str, Any]:
+    payload = _normalize_expr(expr)
+    if payload.get("op") == "rolling":
+        if "anchor_expr" in payload:
+            normalized = {
+                key: _normalize_nested_expr_value(value, default_include_anchor)
+                for key, value in payload.items()
+            }
+            if normalized.get("include_anchor") is None:
+                normalized["include_anchor"] = False
+            return normalized
+        if payload.get("anchor") == "system_date":
+            return {
+                "op": "rolling",
+                "unit": payload["unit"],
+                "value": payload["value"],
+                "anchor_expr": {"op": "anchor", "name": "system_date"},
+                "include_anchor": default_include_anchor,
+            }
+    return {
+        key: _normalize_nested_expr_value(value, default_include_anchor)
+        for key, value in payload.items()
+    }
+
+
 def eval_expr(
     expr: Mapping[str, Any] | Any,
     system_dt: datetime,
-    context: Mapping[str, TimeRange] | None = None,
+    context: Mapping[str, TemporalValue] | None = None,
     business_calendar: BusinessCalendarPort | None = None,
     calendar_versions: set[str] | None = None,
     rolling_anchor_dt: datetime | None = None,
     system_has_time: bool = False,
-) -> TimeRange:
+    reference_resolver: Callable[[str], TemporalValue] | None = None,
+) -> TemporalValue:
     payload = _normalize_expr(expr)
     op = payload["op"]
 
@@ -694,14 +783,31 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return shift_range(base, payload["unit"], payload["value"])
+        return _map_segments(base, lambda segment: shift_range(segment, payload["unit"], payload["value"]))
 
     if op == "rolling":
+        if "anchor_expr" in payload:
+            anchor_value = eval_expr(
+                payload["anchor_expr"],
+                system_dt,
+                context,
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+                rolling_anchor_dt=rolling_anchor_dt,
+                system_has_time=system_has_time,
+                reference_resolver=reference_resolver,
+            )
+            anchor_range = _require_time_range(anchor_value, "rolling anchor")
+            anchor_day = _ensure_single_day(anchor_range, "rolling anchor")
+            effective_anchor_day = anchor_day if payload.get("include_anchor", False) else anchor_day - timedelta(days=1)
+            effective_anchor_dt = datetime.combine(effective_anchor_day, datetime.min.time(), tzinfo=anchor_range.start.tzinfo)
+            return rolling_range(effective_anchor_dt, payload["unit"], payload["value"])
         return rolling_range(rolling_anchor_dt or system_dt, payload["unit"], payload["value"])
 
     if op == "bounded_range":
-        start = eval_expr(
+        start_value = eval_expr(
             payload["start"],
             system_dt,
             context,
@@ -709,8 +815,9 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        end = eval_expr(
+        end_value = eval_expr(
             payload["end"],
             system_dt,
             context,
@@ -718,7 +825,10 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
+        start = _require_time_range(start_value, "bounded_range start")
+        end = _require_time_range(end_value, "bounded_range end")
         return bounded_range(start, end)
 
     if op == "calendar_event_range":
@@ -754,8 +864,9 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return range_edge(base, payload["edge"])
+        return _map_segments(base, lambda segment: range_edge(segment, payload["edge"]))
 
     if op == "business_day_offset":
         if business_calendar is None:
@@ -768,19 +879,23 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return business_day_offset_range(
-            base=base,
-            value=payload["value"],
-            region=payload["region"],
-            business_calendar=business_calendar,
-            calendar_versions=calendar_versions,
+        return _map_segments(
+            base,
+            lambda segment: business_day_offset_range(
+                base=segment,
+                value=payload["value"],
+                region=payload["region"],
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+            ),
         )
 
     if op == "enumerate_calendar_days":
         if business_calendar is None:
             raise ValueError("Business calendar is required for enumerate_calendar_days.")
-        return eval_expr(
+        base = eval_expr(
             payload["base"],
             system_dt,
             context,
@@ -788,16 +903,68 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
+        )
+        return _map_segments(
+            base,
+            lambda segment: _dates_to_atomic_ranges(
+                _filter_calendar_dates(
+                    base=segment,
+                    region=payload["region"],
+                    day_kind=payload["day_kind"],
+                    business_calendar=business_calendar,
+                    calendar_versions=calendar_versions,
+                ),
+                segment.start.tzinfo,
+            ),
         )
 
     if op == "enumerate_makeup_workdays":
-        raise ValueError("enumerate_makeup_workdays must be resolved via resolve_query.")
+        if business_calendar is None:
+            raise ValueError("Business calendar is required for enumerate_makeup_workdays.")
+        version = business_calendar.calendar_version_for_year(
+            region=payload["region"],
+            year=payload["year"],
+        )
+        if version is None:
+            raise ValueError(
+                f"Missing business calendar data for region={payload['region']}, "
+                f"year={payload['year']}"
+            )
+        if calendar_versions is not None:
+            calendar_versions.add(version)
+        matched_dates = business_calendar.list_makeup_workdays(
+            region=payload["region"],
+            event_key=payload["event_key"],
+            year=payload["year"],
+        )
+        return _dates_to_atomic_ranges(matched_dates, system_dt.tzinfo)
 
     if op == "enumerate_hours":
-        raise ValueError("enumerate_hours must be resolved via resolve_query.")
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
+        )
+        return _map_segments(base, lambda segment: TimeSegmentSet(tuple(enumerate_hours_segments(segment))))
 
     if op == "enumerate_subperiods":
-        raise ValueError("enumerate_subperiods must be resolved via resolve_query.")
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
+        )
+        return _map_segments(base, lambda segment: TimeSegmentSet(tuple(split_into_subperiods(segment, payload["unit"]))))
 
     if op == "select_hour":
         base = eval_expr(
@@ -808,8 +975,9 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return select_hour_range(base, payload["hour"])
+        return _map_segments(base, lambda segment: select_hour_range(segment, payload["hour"]))
 
     if op == "slice_hours":
         base = eval_expr(
@@ -820,8 +988,9 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return slice_hours_range(base, payload["mode"], payload["count"])
+        return _map_segments(base, lambda segment: slice_hours_range(segment, payload["mode"], payload["count"]))
 
     if op == "slice_subperiods":
         base = eval_expr(
@@ -832,8 +1001,12 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return slice_subperiods_range(base, payload["mode"], payload["unit"], payload["count"])
+        return _map_segments(
+            base,
+            lambda segment: slice_subperiods_range(segment, payload["mode"], payload["unit"], payload["count"]),
+        )
 
     if op == "select_subperiod":
         base = eval_expr(
@@ -844,8 +1017,9 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return select_subperiod_range(base, payload["unit"], payload["index"])
+        return _map_segments(base, lambda segment: select_subperiod_range(segment, payload["unit"], payload["index"]))
 
     if op == "select_weekday":
         base = eval_expr(
@@ -856,10 +1030,14 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        _require_week_base(base, "select_weekday")
-        target = base.start + timedelta(days=payload["weekday"] - 1)
-        return TimeRange(start_of_day(target), end_of_day(target), grain="day")
+        def _select_weekday(segment: TimeRange) -> TimeRange:
+            _require_week_base(segment, "select_weekday")
+            target = segment.start + timedelta(days=payload["weekday"] - 1)
+            return TimeRange(start_of_day(target), end_of_day(target), grain="day")
+
+        return _map_segments(base, _select_weekday)
 
     if op == "select_weekend":
         base = eval_expr(
@@ -870,11 +1048,15 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        _require_week_base(base, "select_weekend")
-        start = start_of_day(base.start + timedelta(days=5))
-        end = end_of_day(base.start + timedelta(days=6))
-        return TimeRange(start, end, grain=None)
+        def _select_weekend(segment: TimeRange) -> TimeRange:
+            _require_week_base(segment, "select_weekend")
+            start = start_of_day(segment.start + timedelta(days=5))
+            end = end_of_day(segment.start + timedelta(days=6))
+            return TimeRange(start, end, grain=None)
+
+        return _map_segments(base, _select_weekend)
 
     if op == "select_occurrence":
         base = eval_expr(
@@ -885,12 +1067,16 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return select_occurrence_range(
+        return _map_segments(
             base,
-            payload["kind"],
-            payload["ordinal"],
-            payload.get("weekday"),
+            lambda segment: select_occurrence_range(
+                segment,
+                payload["kind"],
+                payload["ordinal"],
+                payload.get("weekday"),
+            ),
         )
 
     if op == "select_month":
@@ -902,10 +1088,12 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        month = payload["month"]
-        year = base.start.year
-        return _natural_month_range(year, month, base.start.tzinfo)
+        return _map_segments(
+            base,
+            lambda segment: _natural_month_range(segment.start.year, payload["month"], segment.start.tzinfo),
+        )
 
     if op == "select_quarter":
         base = eval_expr(
@@ -916,10 +1104,12 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        quarter = payload["quarter"]
-        year = base.start.year
-        return _natural_quarter_range(year, quarter, base.start.tzinfo)
+        return _map_segments(
+            base,
+            lambda segment: _natural_quarter_range(segment.start.year, payload["quarter"], segment.start.tzinfo),
+        )
 
     if op == "select_half_year":
         base = eval_expr(
@@ -930,13 +1120,55 @@ def eval_expr(
             calendar_versions=calendar_versions,
             rolling_anchor_dt=rolling_anchor_dt,
             system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
         )
-        return _natural_half_year_range(base.start.year, payload["half"], base.start.tzinfo)
+        return _map_segments(
+            base,
+            lambda segment: _natural_half_year_range(segment.start.year, payload["half"], segment.start.tzinfo),
+        )
+
+    if op == "select_segment":
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
+        )
+        if isinstance(base, TimeRange):
+            return base
+        if not base.members:
+            raise ValueError("select_segment requires at least one segment.")
+        return base.members[0] if payload["mode"] == "first" else base.members[-1]
+
+    if op == "segments_bounds":
+        base = eval_expr(
+            payload["base"],
+            system_dt,
+            context,
+            business_calendar=business_calendar,
+            calendar_versions=calendar_versions,
+            rolling_anchor_dt=rolling_anchor_dt,
+            system_has_time=system_has_time,
+            reference_resolver=reference_resolver,
+        )
+        if isinstance(base, TimeRange):
+            return base
+        if not base.members:
+            raise ValueError("segments_bounds requires at least one segment.")
+        if len(base.members) == 1:
+            return base.members[0]
+        return TimeRange(base.members[0].start, base.members[-1].end, grain=None)
 
     if op == "reference":
-        if context is None or payload["ref"] not in context:
-            raise ValueError(f"Unknown reference: {payload['ref']}")
-        return context[payload["ref"]]
+        if context is not None and payload["ref"] in context:
+            return context[payload["ref"]]
+        if reference_resolver is not None:
+            return reference_resolver(payload["ref"])
+        raise ValueError(f"Unknown reference: {payload['ref']}")
 
     raise ValueError(f"Unsupported op: {op}")
 
@@ -978,6 +1210,15 @@ def _filter_calendar_dates(
     if day_kind == "holiday":
         return [d for d in dates if business_calendar.is_holiday(region=region, d=d)]
     raise ValueError(f"Unsupported calendar day kind: {day_kind}")
+
+
+def _date_to_day_range(d: date, tzinfo) -> TimeRange:
+    target = datetime.combine(d, datetime.min.time(), tzinfo=tzinfo)
+    return TimeRange(start_of_day(target), end_of_day(target), grain="day")
+
+
+def _dates_to_atomic_ranges(dates: list[date], tzinfo) -> TimeSegmentSet:
+    return TimeSegmentSet(tuple(_date_to_day_range(d, tzinfo) for d in dates))
 
 
 def _merge_dates_to_ranges(dates: list[date], tzinfo) -> list[TimeRange]:
@@ -1046,6 +1287,43 @@ def _resolve_system_context(
     return datetime.strptime(system_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone)), False
 
 
+def _serialize_top_level_value(
+    *,
+    item_id: str,
+    text: str,
+    expr_payload: Mapping[str, Any],
+    value: TemporalValue,
+    timezone: str,
+) -> list[dict[str, Any]]:
+    if isinstance(value, TimeRange):
+        return [
+            _build_resolved_item_payload(
+                item_id=item_id,
+                text=text,
+                timezone=timezone,
+                resolved=value,
+                source_id=None,
+                source_text=None,
+            )
+        ]
+
+    segments = list(value.members)
+    if expr_payload["op"] in {"enumerate_calendar_days", "enumerate_makeup_workdays"} and segments:
+        segments = _merge_dates_to_ranges([segment.start.date() for segment in segments], segments[0].start.tzinfo)
+
+    return [
+        _build_resolved_item_payload(
+            item_id=f"{item_id}__seg_{index:02d}",
+            text=text,
+            timezone=timezone,
+            resolved=segment,
+            source_id=item_id,
+            source_text=text,
+        )
+        for index, segment in enumerate(segments, start=1)
+    ]
+
+
 def resolve_query(
     parsed_time_expressions: dict[str, Any] | ParsedTimeExpressions,
     system_date: str | None = None,
@@ -1060,156 +1338,66 @@ def resolve_query(
         system_datetime=system_datetime,
         timezone=timezone,
     )
+    parsed_payload = parsed.model_dump(mode="python")
+    parsed_payload["time_expressions"] = [
+        {
+            **item,
+            "expr": _normalize_legacy_rolling_expr(item["expr"], parsed.rolling_includes_today),
+        }
+        for item in parsed_payload["time_expressions"]
+    ]
+    parsed = ParsedTimeExpressions.model_validate(parsed_payload)
     rolling_anchor_dt = system_dt if parsed.rolling_includes_today else system_dt - timedelta(days=1)
     if business_calendar is None:
         needs_business_calendar = any(_expr_uses_business_calendar(item.expr) for item in parsed.time_expressions)
         if needs_business_calendar:
             business_calendar = JsonBusinessCalendar.from_root(root=business_calendar_root or get_business_calendar_root())
-    resolved_map: dict[str, TimeRange] = {}
-    resolved_items = []
+    items_by_id = {item.id: item for item in parsed.time_expressions}
+    resolved_map: dict[str, TemporalValue] = {}
+    resolving_stack: list[str] = []
+    resolved_items: list[dict[str, Any]] = []
     calendar_versions: set[str] = set()
     enumerated_counts: dict[str, int] = {}
+
+    def _resolve_item(item_id: str) -> TemporalValue:
+        if item_id in resolved_map:
+            return resolved_map[item_id]
+        if item_id not in items_by_id:
+            raise ValueError(f"Unknown reference: {item_id}")
+        if item_id in resolving_stack:
+            cycle = " -> ".join([*resolving_stack, item_id])
+            raise ValueError(f"Circular reference: {cycle}")
+
+        resolving_stack.append(item_id)
+        item = items_by_id[item_id]
+        try:
+            resolved_value = eval_expr(
+                item.expr,
+                system_dt,
+                resolved_map,
+                business_calendar=business_calendar,
+                calendar_versions=calendar_versions,
+                rolling_anchor_dt=rolling_anchor_dt,
+                system_has_time=system_has_time,
+                reference_resolver=_resolve_item,
+            )
+        finally:
+            resolving_stack.pop()
+        resolved_map[item_id] = resolved_value
+        return resolved_value
+
     for item in parsed.time_expressions:
         expr_payload = _normalize_expr(item.expr)
-        if expr_payload["op"] == "enumerate_calendar_days":
-            if business_calendar is None:
-                raise ValueError("Business calendar is required for enumerate_calendar_days.")
-            base = eval_expr(
-                expr_payload["base"],
-                system_dt,
-                resolved_map,
-                business_calendar=business_calendar,
-                calendar_versions=calendar_versions,
-                rolling_anchor_dt=rolling_anchor_dt,
-                system_has_time=system_has_time,
-            )
-            resolved_map[item.id] = base
-            matched_dates = _filter_calendar_dates(
-                base=base,
-                region=expr_payload["region"],
-                day_kind=expr_payload["day_kind"],
-                business_calendar=business_calendar,
-                calendar_versions=calendar_versions,
-            )
-            enumerated_counts[item.id] = len(matched_dates)
-            segments = _merge_dates_to_ranges(matched_dates, base.start.tzinfo)
-            for index, segment in enumerate(segments, start=1):
-                resolved_items.append(
-                    {
-                        "id": f"{item.id}__seg_{index:02d}",
-                        "text": item.text,
-                        "source_id": item.id,
-                        "source_text": item.text,
-                        "start_time": segment.start.strftime("%Y-%m-%d %H:%M:%S"),
-                        "end_time": segment.end.strftime("%Y-%m-%d %H:%M:%S"),
-                        "timezone": timezone,
-                    }
-                )
-            continue
-
-        if expr_payload["op"] == "enumerate_makeup_workdays":
-            if business_calendar is None:
-                raise ValueError("Business calendar is required for enumerate_makeup_workdays.")
-            version = business_calendar.calendar_version_for_year(
-                region=expr_payload["region"],
-                year=expr_payload["year"],
-            )
-            if version is None:
-                raise ValueError(
-                    f"Missing business calendar data for region={expr_payload['region']}, "
-                    f"year={expr_payload['year']}"
-                )
-            calendar_versions.add(version)
-            matched_dates = business_calendar.list_makeup_workdays(
-                region=expr_payload["region"],
-                event_key=expr_payload["event_key"],
-                year=expr_payload["year"],
-            )
-            enumerated_counts[item.id] = len(matched_dates)
-            segments = _merge_dates_to_ranges(matched_dates, system_dt.tzinfo)
-            for index, segment in enumerate(segments, start=1):
-                resolved_items.append(
-                    {
-                        "id": f"{item.id}__seg_{index:02d}",
-                        "text": item.text,
-                        "source_id": item.id,
-                        "source_text": item.text,
-                        "start_time": segment.start.strftime("%Y-%m-%d %H:%M:%S"),
-                        "end_time": segment.end.strftime("%Y-%m-%d %H:%M:%S"),
-                        "timezone": timezone,
-                    }
-                )
-            continue
-
-        if expr_payload["op"] == "enumerate_subperiods":
-            base = eval_expr(
-                expr_payload["base"],
-                system_dt,
-                resolved_map,
-                business_calendar=business_calendar,
-                calendar_versions=calendar_versions,
-                rolling_anchor_dt=rolling_anchor_dt,
-                system_has_time=system_has_time,
-            )
-            resolved_map[item.id] = base
-            segments = split_into_subperiods(base, expr_payload["unit"])
-            for index, segment in enumerate(segments, start=1):
-                resolved_items.append(
-                    _build_resolved_item_payload(
-                        item_id=f"{item.id}__seg_{index:02d}",
-                        text=item.text,
-                        timezone=timezone,
-                        resolved=segment,
-                        source_id=item.id,
-                        source_text=item.text,
-                    )
-                )
-            continue
-
-        if expr_payload["op"] == "enumerate_hours":
-            base = eval_expr(
-                expr_payload["base"],
-                system_dt,
-                resolved_map,
-                business_calendar=business_calendar,
-                calendar_versions=calendar_versions,
-                rolling_anchor_dt=rolling_anchor_dt,
-                system_has_time=system_has_time,
-            )
-            resolved_map[item.id] = base
-            segments = enumerate_hours_segments(base)
-            enumerated_counts[item.id] = len(segments)
-            for index, segment in enumerate(segments, start=1):
-                resolved_items.append(
-                    _build_resolved_item_payload(
-                        item_id=f"{item.id}__seg_{index:02d}",
-                        text=item.text,
-                        timezone=timezone,
-                        resolved=segment,
-                        source_id=item.id,
-                        source_text=item.text,
-                    )
-                )
-            continue
-
-        resolved = eval_expr(
-            item.expr,
-            system_dt,
-            resolved_map,
-            business_calendar=business_calendar,
-            calendar_versions=calendar_versions,
-            rolling_anchor_dt=rolling_anchor_dt,
-            system_has_time=system_has_time,
-        )
-        resolved_map[item.id] = resolved
-        resolved_items.append(
-            _build_resolved_item_payload(
+        resolved = _resolve_item(item.id)
+        if expr_payload["op"] in {"enumerate_calendar_days", "enumerate_makeup_workdays", "enumerate_hours"}:
+            enumerated_counts[item.id] = len(_flatten_temporal_value(resolved))
+        resolved_items.extend(
+            _serialize_top_level_value(
                 item_id=item.id,
                 text=item.text,
+                expr_payload=expr_payload,
+                value=resolved,
                 timezone=timezone,
-                resolved=resolved,
-                source_id=None,
-                source_text=None,
             )
         )
 

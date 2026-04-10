@@ -24,11 +24,12 @@
 
 - 自然周期：日、周、月、季度、半年、年
 - 周期选择：具体月、具体季度、上半年、下半年
-- 滚动窗口：最近 x 日、最近 x 周、最近 x 月、最近 x 季度、最近 x 半年、最近 x 年
+- 滚动窗口：最近 x 日、最近 x 周、最近 x 月、最近 x 季度、最近 x 半年、最近 x 年，支持按表达式单独指定锚点和是否包含锚点当天
 - 多时间字段：同一句里按下游计算需要返回多个时间窗口
-- 依赖表达：支持“去年同期”等引用前面时间表达的场景
+- 依赖表达：支持“去年同期”等引用其他时间表达的场景，允许前向引用
 - 子周期切片：支持“上个月前两周”“去年的前两个季度”这类大范围内部切片
 - 子周期选择：支持“上个月第一周”“今年第一周”“第一个季度的第一周”这类在大周期里选第 N 个小周期
+- 枚举组合：支持把枚举结果当作普通子表达式继续计算，并通过 `select_segment` / `segments_bounds` 显式转回单段区间
 - 节假日区间：支持 `calendar_event_range`，可解析“去年国庆假期”这类命名节假日范围
 - 业务日偏移：支持 `range_edge + business_day_offset`，可解析“节前最后一个工作日”这类表达
 
@@ -197,6 +198,12 @@ curl -X POST http://127.0.0.1:8000/query/parse \
 }
 ```
 
+对于 hand-written `resolve` 输入，枚举类表达现在也可以继续参与后续计算。例如：
+
+- `select_segment(last, enumerate_makeup_workdays(...))` 可表示“春节调休补班最后一天”
+- `segments_bounds(reference(t1))` 可把一个多段结果显式压成 covering range
+- `reference` 不再要求只能引用前面字段，resolver 会按依赖关系求值
+
 ### 2. resolve
 
 ```bash
@@ -310,9 +317,10 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 
 补充说明：
 
-- `rolling` 类时间窗口默认以 `system_date - 1` 为右端锚点，也就是默认**不含当天**。
-- 如果要保持旧的“含当天”行为，需要在解析结果里显式设置 `"rolling_includes_today": true`。
-- `POST /query/parse` 和 `POST /query/pipeline` 返回的 `parsed_time_expressions` 会显式包含 `rolling_includes_today`，即使模型原始 JSON 省略了该字段。
+- 新的 `rolling` 结构优先使用表达式级字段：`anchor_expr` 表示单日锚点，`include_anchor` 表示是否包含该锚点当天。
+- 当 `anchor_expr = {"op":"anchor","name":"system_date"}` 且 `include_anchor = false` 时，`rolling` 默认以 `system_date - 1` 为右端锚点，也就是默认**不含当天**。
+- `rolling_includes_today` 仍会出现在 `POST /query/parse` 和 `POST /query/pipeline` 的返回里，但它现在只是兼容旧调用方的摘要字段：只有当请求里所有 rolling 都 `include_anchor=true` 时它才会是 `true`；混合请求会返回 `false`。
+- `POST /query/resolve` 在迁移期仍接受旧结构：`anchor: "system_date"` 加顶层 `rolling_includes_today`。
 - 如果问题里完全没有时间信息，`POST /query/parse` 和 `POST /query/pipeline` 会默认补一个“昨天”的单日时间字段。
 - 这个默认“昨天”只影响 parser 驱动的链路；直接调用 `POST /query/rewrite` 且传入空 `resolved_time_expressions` 时，仍会直接返回原问题。
 

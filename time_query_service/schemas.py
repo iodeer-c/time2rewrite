@@ -41,7 +41,19 @@ class RollingExpr(StrictModel):
     op: Literal["rolling"]
     unit: TimeUnit
     value: int = Field(ge=1)
-    anchor: Literal["system_date"]
+    anchor: Literal["system_date"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    anchor_expr: Expr | None = Field(default=None, exclude_if=lambda value: value is None)
+    include_anchor: StrictBool | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def validate_anchor_fields(self) -> "RollingExpr":
+        has_legacy_anchor = self.anchor is not None
+        has_local_anchor = self.anchor_expr is not None
+        if has_legacy_anchor == has_local_anchor:
+            raise ValueError("rolling requires exactly one of anchor or anchor_expr")
+        if has_local_anchor and self.include_anchor is None:
+            self.include_anchor = False
+        return self
 
 
 class RollingHoursExpr(StrictModel):
@@ -147,6 +159,17 @@ class SelectHalfYearExpr(StrictModel):
     base: "Expr"
 
 
+class SelectSegmentExpr(StrictModel):
+    op: Literal["select_segment"]
+    mode: SliceMode
+    base: "Expr"
+
+
+class SegmentsBoundsExpr(StrictModel):
+    op: Literal["segments_bounds"]
+    base: "Expr"
+
+
 class SelectSubperiodExpr(StrictModel):
     op: Literal["select_subperiod"]
     unit: SelectSubperiodUnit
@@ -214,6 +237,8 @@ Expr = Annotated[
     | SelectMonthExpr
     | SelectQuarterExpr
     | SelectHalfYearExpr
+    | SelectSegmentExpr
+    | SegmentsBoundsExpr
     | SelectSubperiodExpr
     | EnumerateSubperiodsExpr
     | SelectOccurrenceExpr
@@ -223,6 +248,7 @@ Expr = Annotated[
 ]
 
 ShiftExpr.model_rebuild()
+RollingExpr.model_rebuild()
 BoundedRangeExpr.model_rebuild()
 RangeEdgeExpr.model_rebuild()
 BusinessDayOffsetExpr.model_rebuild()
@@ -236,6 +262,8 @@ SelectWeekendExpr.model_rebuild()
 SelectMonthExpr.model_rebuild()
 SelectQuarterExpr.model_rebuild()
 SelectHalfYearExpr.model_rebuild()
+SelectSegmentExpr.model_rebuild()
+SegmentsBoundsExpr.model_rebuild()
 SelectSubperiodExpr.model_rebuild()
 EnumerateSubperiodsExpr.model_rebuild()
 SelectOccurrenceExpr.model_rebuild()

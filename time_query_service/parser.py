@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
@@ -34,7 +34,7 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 2. 如果回答问题需要多个独立时间窗口，则输出多个 time_expression
 3. 是否输出一个还是多个，不取决于原文中有几个时间短语，而取决于下游计算需要几个时间字段
 4. text 不要求必须严格等于原文片段；当一个原文时间短语需要拆成多个子时间字段时，text 应写成规范化后的子时间字段名称，便于 code 和 LLM-2 使用
-5. 如果存在依赖关系，例如“去年同期”依赖“今年3月”，则按依赖顺序输出
+5. 如果存在依赖关系，例如“去年同期”依赖“今年3月”，必须用 reference 明确依赖；time_expressions 不要求按依赖顺序输出
 6. 如果一个时间短语本身表示一个整体范围，则输出一个整体 time_expression
 7. 如果问题包含“分别”“各自”“依次”“每个”“每个月”“每个季度”“每半年”“每天”“每周”“每年”等语义，并且需要分别计算多个子时间窗口，则必须拆成多个 time_expression
    但如果父区间是 rolling，且语义是“枚举该 rolling 区间内全部自然子周期”，优先输出一个 enumerate_subperiods，由 code 负责展开
@@ -45,7 +45,7 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 3. 如果没有识别到时间字段，且用户问题里没有任何时间信息，默认补一个“昨天”的单日时间字段，不要输出空数组
 
 字段定义：
-- rolling_includes_today: 顶层布尔字段，可省略；仅用于控制 rolling 是否包含 system_date 当日。省略等价于 false
+- rolling_includes_today: 顶层布尔字段，可省略；作为兼容旧调用方的保留字段存在。对于新的 rolling 结构，它只表示一个兼容性摘要值，不再作为每个 rolling 节点的唯一语义来源。省略等价于 false
 - time_expressions: 数组，包含 0 个或多个时间字段对象
 - id: 时间字段唯一标识，使用 t1、t2、t3 这种格式，并按输出顺序递增
 - text: 时间字段文本，可为原文时间短语，也可为规范化后的子时间字段名称
@@ -76,6 +76,8 @@ expr 只允许以下 op：
 - select_month
 - select_quarter
 - select_half_year
+- select_segment
+- segments_bounds
 - reference
 
 各 op 含义如下：
@@ -98,12 +100,15 @@ expr 只允许以下 op：
 - op = "rolling"
 - unit: 允许 day/week/month/quarter/half_year/year
 - value: 正整数
-- anchor: 只允许 "system_date"
+- anchor_expr: 一个 expr 对象，且结果必须是单日范围；优先使用 {"op":"anchor","name":"system_date"} 表示以 system_date 为锚
+- include_anchor: 布尔值；true 表示 rolling 包含 anchor_expr 对应当天，false 表示 rolling 右端落在 anchor_expr 前一天
 
-rolling_includes_today 顶层规则：
-- 仅当用户明确要求 rolling 类窗口“含今天 / 含今日 / 截至今天 / 至今 / 算到今天 / 最近一周含今天”时，才输出 "rolling_includes_today": true
-- 对“本月收益 / 本周收益 / 本年收益 / 今年3月 / 上个月 / 这个月第二个周二 / 本月第二周”这类非 rolling 表达，不得因为句子里出现“今天”就输出 true
-- 如果问题里既有“今天”单日又有 rolling，除非用户明确要求 rolling 含今天，否则 rolling_includes_today 仍应为 false
+兼容规则：
+- 如果你明确输出新的 rolling 结构，必须优先使用 anchor_expr + include_anchor，不要再输出旧的 anchor 字段
+- 顶层 rolling_includes_today 只是兼容旧调用方的保留字段；即使存在多个 rolling，也必须分别在每个 rolling 节点上写出 include_anchor
+- 对“最近一周”“最近两个月”这类默认不含今天的表达，include_anchor 必须是 false
+- 对“最近一周含今天 / 截至今天 / 至今 / 到今天”这类明确包含锚日的表达，include_anchor 必须是 true
+- 对“以去年某天为锚的最近7天”“以节前最后一个工作日为锚的最近一周”这类表达，anchor_expr 必须表示那个单日锚点，不要退化成 system_date
 
 4.1 rolling_hours
 - op = "rolling_hours"
@@ -329,8 +334,27 @@ week 作为子周期时，统一使用下面的编号规则：
 - half: 1 或 2，1=上半年，2=下半年
 - base: 一个 expr 对象
 
-17. reference
-- ref: string，引用前面已经出现过的时间字段 id，例如 t1
+17. select_segment
+- op = "select_segment"
+- mode: 只允许 "first" 或 "last"
+- base: 一个 expr 对象
+
+语义：
+- 用于从一个多段结果里显式取第一段或最后一段
+- 例如“春节调休补班最后一天”“最近一年各月中的第一个月”
+- 如果 base 本来就是单一连续区间，则原样返回
+
+18. segments_bounds
+- op = "segments_bounds"
+- base: 一个 expr 对象
+
+语义：
+- 用于把一个多段结果显式压成一个 covering range
+- 例如“春节调休补班覆盖区间”
+- 不要隐式把多段结果自动并成一个大区间；只有明确需要 covering range 时才使用它
+
+19. reference
+- ref: string，引用另一个时间字段 id，例如 t1
 
 规则：
 - 如果用户问题里没有任何时间信息，默认输出 1 个时间字段，表示“昨天”：
@@ -357,8 +381,9 @@ week 作为子周期时，统一使用下面的编号规则：
 - 一个问题中可能只出现一个原文时间短语，但为了回答问题，可能需要输出多个 time_expression
 - 一个问题中也可能出现多个原文时间短语，但如果最终只需要一个整体时间窗口，也可以只输出一个 time_expression
 - 如果某个时间字段依赖另一个时间字段，例如“去年同期”“上月同期”“去年同月”，不要直接基于 system_date 计算
-- 这类依赖表达必须使用 reference 引用前面已经出现的时间字段 id
-- reference 只能引用前面已经出现的时间字段，不能引用后面的时间字段
+- 这类依赖表达必须使用 reference 引用对应的时间字段 id
+- reference 可以引用后面定义的时间字段；不要为了迁就解析顺序改写原本更自然的结构
+- 如果某个表达需要把多段结果转回单个时间窗口，必须显式使用 select_segment 或 segments_bounds，不要隐式合并
 - 如果问题要求分别返回多个子周期结果，通常必须拆成多个独立 time_expression
 - 但如果父区间是 rolling，且要求把 rolling 区间内全部自然子周期都列出来，优先输出 1 个 enumerate_subperiods
 - 如果问题本身是显式起止区间，例如“2025年4月到至今”“从2026年4月1日到今天”，必须优先输出 bounded_range
@@ -1117,26 +1142,27 @@ week 作为子周期时，统一使用下面的编号规则：
 ROLLING_HOURS_QUERY_PATTERN = re.compile(r"(?:最近|近|过去)\s*(\d+)\s*(?:个)?小时")
 HOUR_ENUMERATION_MARKERS = ("每小时", "各小时", "逐小时")
 
-ROLLING_FLAG_VALIDATOR_SYSTEM_PROMPT = """你是一个严格的布尔校验器。你的任务只是在已有解析结果基础上判断 rolling_includes_today 应该是 true 还是 false。
+ROLLING_INCLUDE_ANCHOR_VALIDATOR_SYSTEM_PROMPT = """你是一个严格的 rolling 局部布尔校验器。你的任务只是在已有解析结果基础上判断每个 rolling time_expression 的 include_anchor 应该是 true 还是 false。
 
 你只能输出一个 JSON 对象，结构必须严格如下：
 {
-  "rolling_includes_today": false
+  "include_anchor_by_id": {
+    "t1": false
+  }
 }
 
 规则：
-1. 你只能判断顶层 rolling_includes_today，不能修改 time_expressions，不能新增字段，不能解释
-2. 只有当用户明确要求 rolling 类窗口“含今天 / 含今日 / 截至今天 / 到今天 / 至今 / 算到今天”时，rolling_includes_today 才能是 true
-3. 仅仅出现“今天”这个词，不等于 rolling 必须含今天
-4. 如果句子里同时有“今天”单日和 rolling，除非用户明确要求 rolling 含今天，否则必须返回 false
-5. 如果第一轮解析里没有 rolling 节点，也必须返回 false
+1. 你只能判断 include_anchor_by_id，不能修改 time_expressions，不能新增别的字段，不能解释
+2. key 必须是第一轮解析结果里包含 rolling 的 time_expression id
+3. 只有当用户明确要求某个 rolling 窗口“含今天 / 含今日 / 截至今天 / 到今天 / 至今 / 算到今天”时，该 id 才能是 true
+4. 仅仅出现“今天”这个词，不等于 rolling 必须含今天
+5. 如果句子里同时有“今天”单日和 rolling，除非用户明确要求 rolling 含今天，否则对应 rolling id 必须返回 false
+6. 如果一个请求里有多个 rolling，必须分别判断每个 id，不能用一个全局布尔替代
 
 示例：
-- “最近一周收益” -> {"rolling_includes_today": false}
-- “最近一周收益，含今天” -> {"rolling_includes_today": true}
-- “最近一周收益，截至昨天” -> {"rolling_includes_today": false}
-- “本月收益” -> {"rolling_includes_today": false}
-- “今天和最近一周对比” -> {"rolling_includes_today": false}
+- “最近一周收益”，第一轮里 rolling id 为 t1 -> {"include_anchor_by_id": {"t1": false}}
+- “最近一周收益，含今天”，第一轮里 rolling id 为 t1 -> {"include_anchor_by_id": {"t1": true}}
+- “最近一周和最近一周含今天对比”，第一轮里 rolling id 为 t1、t2 -> {"include_anchor_by_id": {"t1": false, "t2": true}}
 """
 
 
@@ -1183,7 +1209,7 @@ def build_parser_repair_prompt(raw_output: str) -> str:
     )
 
 
-def build_rolling_flag_validator_prompt(
+def build_rolling_include_anchor_validator_prompt(
     query: str,
     system_date: str | None,
     system_datetime: str | None,
@@ -1191,7 +1217,7 @@ def build_rolling_flag_validator_prompt(
     timezone: str = "Asia/Shanghai",
 ) -> str:
     lines = [
-        "请只判断 rolling_includes_today 应该是 true 还是 false，并输出严格 JSON。",
+        "请只判断每个 rolling time_expression 的 include_anchor，并输出严格 JSON。",
         "",
         f"system_date: {_effective_system_date(system_date, system_datetime)}",
     ]
@@ -1208,10 +1234,10 @@ def build_rolling_flag_validator_prompt(
     return "\n".join(lines)
 
 
-class _RollingFlagDecision(BaseModel):
+class _RollingIncludeAnchorDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    rolling_includes_today: StrictBool
+    include_anchor_by_id: dict[str, StrictBool]
 
 
 class QueryParser:
@@ -1261,6 +1287,7 @@ class QueryParser:
 
         payload = self._normalize_recent_hours_payload(payload, query)
         parsed = self._normalize_no_time_parse(ParsedTimeExpressions.model_validate(payload))
+        parsed = self._normalize_legacy_rolling_expressions(parsed)
         parsed = self._normalize_irrelevant_rolling_flag(parsed)
         if self._parsed_contains_current_hour(parsed) and system_datetime is None:
             raise ValueError("current_hour requires system_datetime.")
@@ -1269,17 +1296,16 @@ class QueryParser:
         if not self._parsed_contains_rolling(parsed):
             return parsed
 
-        validated_flag = self._validate_rolling_includes_today(
+        validated_include_anchor_by_id = self._validate_rolling_include_anchor_by_id(
             query=query,
             system_date=system_date,
             system_datetime=system_datetime,
             timezone=timezone,
-            first_pass_payload=payload,
-            fallback_value=parsed.rolling_includes_today,
+            first_pass_payload=parsed.model_dump(mode="python"),
+            fallback_values=self._rolling_include_anchor_by_id(parsed),
         )
-        merged_payload = dict(payload)
-        merged_payload["rolling_includes_today"] = validated_flag
-        return ParsedTimeExpressions.model_validate(merged_payload)
+        parsed = self._apply_rolling_include_anchor_by_id(parsed, validated_include_anchor_by_id)
+        return self._synchronize_legacy_rolling_flag(parsed)
 
     @staticmethod
     def _normalize_no_time_parse(parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
@@ -1356,11 +1382,135 @@ class QueryParser:
             return ParsedTimeExpressions.model_validate(payload)
         return parsed
 
+    @classmethod
+    def _normalize_nested_expr_payload(cls, value: Any, default_include_anchor: bool) -> Any:
+        if hasattr(value, "model_dump"):
+            payload = value.model_dump(mode="python")
+            if "op" in payload:
+                return cls._normalize_legacy_rolling_expr_payload(payload, default_include_anchor)
+            return {
+                key: cls._normalize_nested_expr_payload(nested_value, default_include_anchor)
+                for key, nested_value in payload.items()
+            }
+        if isinstance(value, Mapping):
+            payload = dict(value)
+            if "op" in payload:
+                return cls._normalize_legacy_rolling_expr_payload(payload, default_include_anchor)
+            return {
+                key: cls._normalize_nested_expr_payload(nested_value, default_include_anchor)
+                for key, nested_value in payload.items()
+            }
+        if isinstance(value, list):
+            return [cls._normalize_nested_expr_payload(item, default_include_anchor) for item in value]
+        return value
+
+    @classmethod
+    def _normalize_legacy_rolling_expr_payload(cls, expr_payload: dict[str, Any], default_include_anchor: bool) -> dict[str, Any]:
+        if expr_payload.get("op") == "rolling":
+            if "anchor_expr" in expr_payload:
+                normalized = {
+                    key: cls._normalize_nested_expr_payload(value, default_include_anchor)
+                    for key, value in expr_payload.items()
+                }
+                if normalized.get("include_anchor") is None:
+                    normalized["include_anchor"] = False
+                return normalized
+            if expr_payload.get("anchor") == "system_date":
+                return {
+                    "op": "rolling",
+                    "unit": expr_payload["unit"],
+                    "value": expr_payload["value"],
+                    "anchor_expr": {"op": "anchor", "name": "system_date"},
+                    "include_anchor": default_include_anchor,
+                }
+        return {
+            key: cls._normalize_nested_expr_payload(value, default_include_anchor)
+            for key, value in expr_payload.items()
+        }
+
+    @classmethod
+    def _normalize_legacy_rolling_expressions(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        payload["time_expressions"] = [
+            {
+                **item,
+                "expr": cls._normalize_legacy_rolling_expr_payload(item["expr"], parsed.rolling_includes_today),
+            }
+            for item in payload["time_expressions"]
+        ]
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @classmethod
+    def _first_rolling_include_anchor(cls, expr: Any) -> bool | None:
+        if getattr(expr, "op", None) == "rolling":
+            include_anchor = getattr(expr, "include_anchor", None)
+            return False if include_anchor is None else include_anchor
+
+        for value in vars(expr).values():
+            if isinstance(value, list):
+                for item in value:
+                    if hasattr(item, "op"):
+                        include_anchor = cls._first_rolling_include_anchor(item)
+                        if include_anchor is not None:
+                            return include_anchor
+            elif hasattr(value, "op"):
+                include_anchor = cls._first_rolling_include_anchor(value)
+                if include_anchor is not None:
+                    return include_anchor
+        return None
+
+    @classmethod
+    def _rolling_include_anchor_by_id(cls, parsed: ParsedTimeExpressions) -> dict[str, bool]:
+        values: dict[str, bool] = {}
+        for item in parsed.time_expressions:
+            include_anchor = cls._first_rolling_include_anchor(item.expr)
+            if include_anchor is not None:
+                values[item.id] = include_anchor
+        return values
+
+    @classmethod
+    def _apply_include_anchor_to_expr_payload(cls, expr_payload: dict[str, Any], include_anchor: bool | None) -> dict[str, Any]:
+        if expr_payload.get("op") == "rolling":
+            updated = {
+                key: cls._normalize_nested_expr_payload(value, False)
+                for key, value in expr_payload.items()
+            }
+            if include_anchor is not None:
+                updated["include_anchor"] = include_anchor
+            return updated
+        return {
+            key: cls._normalize_nested_expr_payload(value, False) if not isinstance(value, Mapping) or "op" not in value else cls._apply_include_anchor_to_expr_payload(dict(value), include_anchor)
+            for key, value in expr_payload.items()
+        }
+
+    @classmethod
+    def _apply_rolling_include_anchor_by_id(
+        cls,
+        parsed: ParsedTimeExpressions,
+        include_anchor_by_id: dict[str, bool],
+    ) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        payload["time_expressions"] = [
+            {
+                **item,
+                "expr": cls._apply_include_anchor_to_expr_payload(item["expr"], include_anchor_by_id.get(item["id"])),
+            }
+            for item in payload["time_expressions"]
+        ]
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @classmethod
+    def _synchronize_legacy_rolling_flag(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        include_anchor_values = list(cls._rolling_include_anchor_by_id(parsed).values())
+        payload["rolling_includes_today"] = bool(include_anchor_values) and all(include_anchor_values)
+        return ParsedTimeExpressions.model_validate(payload)
+
     def _invoke_text(self, messages: list[Any]) -> str:
         result = self._get_text_runner().invoke(messages)
         return self._coerce_text(result)
 
-    def _validate_rolling_includes_today(
+    def _validate_rolling_include_anchor_by_id(
         self,
         *,
         query: str,
@@ -1368,12 +1518,12 @@ class QueryParser:
         system_datetime: str | None,
         timezone: str,
         first_pass_payload: dict[str, Any],
-        fallback_value: bool,
-    ) -> bool:
+        fallback_values: dict[str, bool],
+    ) -> dict[str, bool]:
         messages = [
-            SystemMessage(content=ROLLING_FLAG_VALIDATOR_SYSTEM_PROMPT),
+            SystemMessage(content=ROLLING_INCLUDE_ANCHOR_VALIDATOR_SYSTEM_PROMPT),
             HumanMessage(
-                content=build_rolling_flag_validator_prompt(
+                content=build_rolling_include_anchor_validator_prompt(
                     query=query,
                     system_date=system_date,
                     system_datetime=system_datetime,
@@ -1385,10 +1535,14 @@ class QueryParser:
         try:
             raw_text = self._invoke_text(messages)
             payload = self._parse_json_payload(raw_text)
-            decision = _RollingFlagDecision.model_validate(payload)
+            decision = _RollingIncludeAnchorDecision.model_validate(payload)
         except (ValueError, ValidationError):
-            return fallback_value
-        return decision.rolling_includes_today
+            return fallback_values
+        merged_values = dict(fallback_values)
+        for item_id in fallback_values:
+            if item_id in decision.include_anchor_by_id:
+                merged_values[item_id] = decision.include_anchor_by_id[item_id]
+        return merged_values
 
     @staticmethod
     def _coerce_text(result: Any) -> str:
