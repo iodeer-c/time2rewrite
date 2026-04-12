@@ -45,11 +45,18 @@
   ],
   "event_spans": [
     {"event_key": "new_year", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-01-01", "end": "2022-01-03", "rest_group_id": "cn-2022-new-year"},
+    {"event_key": "new_year", "schedule_year": 2022, "scope": "statutory", "start": "2022-01-01", "end": "2022-01-01"},
     {"event_key": "spring_festival", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-01-31", "end": "2022-02-06", "rest_group_id": "cn-2022-spring-festival"},
+    {"event_key": "spring_festival", "schedule_year": 2022, "scope": "statutory", "start": "2022-02-01", "end": "2022-02-01"},
     {"event_key": "qingming", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-04-03", "end": "2022-04-05", "rest_group_id": "cn-2022-qingming"},
+    {"event_key": "qingming", "schedule_year": 2022, "scope": "statutory", "start": "2022-04-05", "end": "2022-04-05"},
     {"event_key": "labor_day", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-04-30", "end": "2022-05-04", "rest_group_id": "cn-2022-labor-day"},
+    {"event_key": "labor_day", "schedule_year": 2022, "scope": "statutory", "start": "2022-05-01", "end": "2022-05-01"},
     {"event_key": "dragon_boat", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-06-03", "end": "2022-06-05", "rest_group_id": "cn-2022-dragon-boat"},
+    {"event_key": "dragon_boat", "schedule_year": 2022, "scope": "statutory", "start": "2022-06-03", "end": "2022-06-03"},
     {"event_key": "mid_autumn", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-09-10", "end": "2022-09-12", "rest_group_id": "cn-2022-mid-autumn"},
-    {"event_key": "national_day", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-10-01", "end": "2022-10-07", "rest_group_id": "cn-2022-national-day"}
+    {"event_key": "mid_autumn", "schedule_year": 2022, "scope": "statutory", "start": "2022-09-10", "end": "2022-09-10"},
+    {"event_key": "national_day", "schedule_year": 2022, "scope": "consecutive_rest", "start": "2022-10-01", "end": "2022-10-07", "rest_group_id": "cn-2022-national-day"},
+    {"event_key": "national_day", "schedule_year": 2022, "scope": "statutory", "start": "2022-10-01", "end": "2022-10-01"}
   ]
 }

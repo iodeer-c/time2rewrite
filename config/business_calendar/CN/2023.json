@@ -41,11 +41,18 @@
   ],
   "event_spans": [
     {"event_key": "new_year", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2022-12-31", "end": "2023-01-02", "rest_group_id": "cn-2023-new-year"},
+    {"event_key": "new_year", "schedule_year": 2023, "scope": "statutory", "start": "2023-01-01", "end": "2023-01-01"},
     {"event_key": "spring_festival", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-01-21", "end": "2023-01-27", "rest_group_id": "cn-2023-spring-festival"},
+    {"event_key": "spring_festival", "schedule_year": 2023, "scope": "statutory", "start": "2023-01-22", "end": "2023-01-22"},
     {"event_key": "qingming", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-04-05", "end": "2023-04-05", "rest_group_id": "cn-2023-qingming"},
+    {"event_key": "qingming", "schedule_year": 2023, "scope": "statutory", "start": "2023-04-05", "end": "2023-04-05"},
     {"event_key": "labor_day", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-04-29", "end": "2023-05-03", "rest_group_id": "cn-2023-labor-day"},
+    {"event_key": "labor_day", "schedule_year": 2023, "scope": "statutory", "start": "2023-05-01", "end": "2023-05-01"},
     {"event_key": "dragon_boat", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-06-22", "end": "2023-06-24", "rest_group_id": "cn-2023-dragon-boat"},
+    {"event_key": "dragon_boat", "schedule_year": 2023, "scope": "statutory", "start": "2023-06-22", "end": "2023-06-22"},
     {"event_key": "mid_autumn", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-09-29", "end": "2023-10-06", "rest_group_id": "cn-2023-autumn-merged"},
-    {"event_key": "national_day", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-09-29", "end": "2023-10-06", "rest_group_id": "cn-2023-autumn-merged"}
+    {"event_key": "mid_autumn", "schedule_year": 2023, "scope": "statutory", "start": "2023-09-29", "end": "2023-09-29"},
+    {"event_key": "national_day", "schedule_year": 2023, "scope": "consecutive_rest", "start": "2023-09-29", "end": "2023-10-06", "rest_group_id": "cn-2023-autumn-merged"},
+    {"event_key": "national_day", "schedule_year": 2023, "scope": "statutory", "start": "2023-10-01", "end": "2023-10-01"}
   ]
 }

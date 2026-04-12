@@ -46,11 +46,18 @@
   ],
   "event_spans": [
     {"event_key": "new_year", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-01-01", "end": "2026-01-03", "rest_group_id": "cn-2026-new-year"},
+    {"event_key": "new_year", "schedule_year": 2026, "scope": "statutory", "start": "2026-01-01", "end": "2026-01-01"},
     {"event_key": "spring_festival", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-02-15", "end": "2026-02-23", "rest_group_id": "cn-2026-spring"},
+    {"event_key": "spring_festival", "schedule_year": 2026, "scope": "statutory", "start": "2026-02-17", "end": "2026-02-17"},
     {"event_key": "qingming", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-04-04", "end": "2026-04-06", "rest_group_id": "cn-2026-qingming"},
+    {"event_key": "qingming", "schedule_year": 2026, "scope": "statutory", "start": "2026-04-05", "end": "2026-04-05"},
     {"event_key": "labor_day", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-05-01", "end": "2026-05-05", "rest_group_id": "cn-2026-labor"},
+    {"event_key": "labor_day", "schedule_year": 2026, "scope": "statutory", "start": "2026-05-01", "end": "2026-05-01"},
     {"event_key": "dragon_boat", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-06-19", "end": "2026-06-21", "rest_group_id": "cn-2026-dragon-boat"},
+    {"event_key": "dragon_boat", "schedule_year": 2026, "scope": "statutory", "start": "2026-06-19", "end": "2026-06-19"},
     {"event_key": "mid_autumn", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-09-25", "end": "2026-09-27", "rest_group_id": "cn-2026-mid-autumn"},
-    {"event_key": "national_day", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-10-01", "end": "2026-10-07", "rest_group_id": "cn-2026-national-day"}
+    {"event_key": "mid_autumn", "schedule_year": 2026, "scope": "statutory", "start": "2026-09-25", "end": "2026-09-25"},
+    {"event_key": "national_day", "schedule_year": 2026, "scope": "consecutive_rest", "start": "2026-10-01", "end": "2026-10-07", "rest_group_id": "cn-2026-national-day"},
+    {"event_key": "national_day", "schedule_year": 2026, "scope": "statutory", "start": "2026-10-01", "end": "2026-10-01"}
   ]
 }

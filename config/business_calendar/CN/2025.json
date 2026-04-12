@@ -40,11 +40,18 @@
   ],
   "event_spans": [
     {"event_key": "new_year", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-01-01", "end": "2025-01-01", "rest_group_id": "cn-2025-new-year"},
+    {"event_key": "new_year", "schedule_year": 2025, "scope": "statutory", "start": "2025-01-01", "end": "2025-01-01"},
     {"event_key": "spring_festival", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-01-28", "end": "2025-02-04", "rest_group_id": "cn-2025-spring"},
+    {"event_key": "spring_festival", "schedule_year": 2025, "scope": "statutory", "start": "2025-01-29", "end": "2025-01-29"},
     {"event_key": "qingming", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-04-04", "end": "2025-04-06", "rest_group_id": "cn-2025-qingming"},
+    {"event_key": "qingming", "schedule_year": 2025, "scope": "statutory", "start": "2025-04-04", "end": "2025-04-04"},
     {"event_key": "labor_day", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-05-01", "end": "2025-05-05", "rest_group_id": "cn-2025-labor"},
+    {"event_key": "labor_day", "schedule_year": 2025, "scope": "statutory", "start": "2025-05-01", "end": "2025-05-01"},
     {"event_key": "dragon_boat", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-05-31", "end": "2025-06-02", "rest_group_id": "cn-2025-dragon-boat"},
+    {"event_key": "dragon_boat", "schedule_year": 2025, "scope": "statutory", "start": "2025-05-31", "end": "2025-05-31"},
     {"event_key": "national_day", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-10-01", "end": "2025-10-08", "rest_group_id": "cn-2025-autumn-merged"},
-    {"event_key": "mid_autumn", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-10-01", "end": "2025-10-08", "rest_group_id": "cn-2025-autumn-merged"}
+    {"event_key": "national_day", "schedule_year": 2025, "scope": "statutory", "start": "2025-10-01", "end": "2025-10-01"},
+    {"event_key": "mid_autumn", "schedule_year": 2025, "scope": "consecutive_rest", "start": "2025-10-01", "end": "2025-10-08", "rest_group_id": "cn-2025-autumn-merged"},
+    {"event_key": "mid_autumn", "schedule_year": 2025, "scope": "statutory", "start": "2025-10-06", "end": "2025-10-06"}
   ]
 }

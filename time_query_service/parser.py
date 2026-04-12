@@ -10,6 +10,55 @@ from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 from time_query_service.schemas import ParsedTimeExpressions
 
 
+ABSOLUTE_YEAR_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?:度|全年)?\s*$")
+ABSOLUTE_MONTH_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?P<month>\d{1,2})月(?:份)?\s*$")
+ABSOLUTE_QUARTER_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?:第)?(?P<quarter>[一二三四1234])季度\s*$")
+ABSOLUTE_HALF_YEAR_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?P<half>[上下])半年\s*$")
+HOLIDAY_DAY_PATTERN = re.compile(
+    r"^\s*(?:(?P<relative>去年|今年|明年)|(?P<year>\d{4})年)?(?P<holiday>元旦|春节|清明节|清明|劳动节|端午节|端午|中秋节|中秋|国庆节|国庆)(?:当天|当日|正日)\s*$"
+)
+HOLIDAY_FILTER_SELECTION_PATTERN = re.compile(
+    r"^\s*(?:(?P<relative>去年|今年|明年)|(?P<year>\d{4})年)?(?P<holiday>春节|清明节|清明|劳动节|端午节|端午|中秋节|中秋|国庆节|国庆)(?:假期)?(?:(?P<ordinal>第一个|最后一个|倒数第二个)|(?P<slice_mode>前|最后)(?P<count>[一二两三四五六七八九十\d]+)个)(?P<day_kind>工作日|休息日|节假日)\s*$"
+)
+MONTH_FILTER_SELECTION_PATTERN = re.compile(
+    r"^\s*(?P<base>\d{4}年\d{1,2}月(?:份)?|本月|上月|上个月|下月|下个月)(?:(?P<ordinal>第一个|最后一个|倒数第二个)|(?P<slice_mode>前|最后)(?P<count>[一二两三四五六七八九十\d]+)个)(?P<day_kind>工作日|休息日|节假日)\s*$"
+)
+
+HOLIDAY_EVENT_KEY_BY_TEXT = {
+    "元旦": "new_year",
+    "春节": "spring_festival",
+    "清明": "qingming",
+    "清明节": "qingming",
+    "劳动节": "labor_day",
+    "端午": "dragon_boat",
+    "端午节": "dragon_boat",
+    "中秋": "mid_autumn",
+    "中秋节": "mid_autumn",
+    "国庆": "national_day",
+    "国庆节": "national_day",
+}
+
+CALENDAR_DAY_KIND_BY_TEXT = {
+    "工作日": "workday",
+    "休息日": "restday",
+    "节假日": "holiday",
+}
+
+CHINESE_SMALL_NUMBER = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
 PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把用户中文问题中为了回答该问题所需的时间字段解析成固定 JSON。
 
 你只能做结构化抽取，不能回答问题，不能补充解释，不能输出 markdown，不能输出 JSON 之外的任何内容。
@@ -54,10 +103,16 @@ PARSER_SYSTEM_PROMPT = """你是一个时间字段生成器。你的任务是把
 expr 只允许以下 op：
 - anchor
 - current_period
+- literal_date
+- literal_datetime
+- literal_period
 - shift
 - rolling
 - rolling_hours
+- rolling_minutes
+- rolling_business_days
 - bounded_range
+- period_to_date
 - calendar_event_range
 - range_edge
 - business_day_offset
@@ -77,6 +132,7 @@ expr 只允许以下 op：
 - select_quarter
 - select_half_year
 - select_segment
+- slice_segments
 - segments_bounds
 - reference
 
@@ -84,11 +140,44 @@ expr 只允许以下 op：
 
 1. anchor
 - op = "anchor"
-- name: 只允许 "system_date"
+- name: 只允许 "system_date" 或 "system_datetime"
+
+语义：
+- `anchor(system_date)` 表示当前自然日
+- `anchor(system_datetime)` 表示当前精确时刻；只有在问题明确需要“现在这一刻”时才使用
 
 2. current_period
 - op = "current_period"
 - unit: 只允许 day/week/month/quarter/half_year/year
+
+2.1 literal_date
+- op = "literal_date"
+- date: 格式固定为 YYYY-MM-DD
+
+语义：
+- 表示一个显式自然日
+- 例如“2026年4月1日”
+
+2.2 literal_datetime
+- op = "literal_datetime"
+- datetime: 格式固定为 YYYY-MM-DD HH:MM:SS
+
+语义：
+- 表示一个显式精确时刻
+- 如果用户只说到分钟，秒统一补成 00
+
+2.3 literal_period
+- op = "literal_period"
+- unit: 只允许 year/month/quarter/half_year
+- year: 四位年份整数
+- month: 当 unit=month 时必填，1 到 12
+- quarter: 当 unit=quarter 时必填，1 到 4
+- half: 当 unit=half_year 时必填，1 或 2
+
+语义：
+- 表示一个显式自然周期，而不是某一天
+- 裸年份（例如“2024年”“2024年度”“2024年全年”）优先使用 literal_period(unit="year")
+- 显式月份、季度、半年优先使用 literal_period，不要退化成 literal_date 或相对 shift
 
 3. shift
 - op = "shift"
@@ -130,8 +219,39 @@ expr 只允许以下 op：
 - 表示从 start 到 end 的连续显式区间
 - 取值规则固定为从 start 的开始时刻到 end 的结束时刻
 - 用于“从A到B / A到B / A至B / A到至今 / A截至今天”这类表达
-- 对“至今 / 到今天 / 截至今天 / 到当前”这类终点，优先使用 anchor(system_date) 表示
+- 如果终点是自然日语义的“至今 / 到今天 / 截至今天”，优先使用 anchor(system_date)
+- 如果终点是精确时刻语义的“到现在 / 到当前时刻 / 到此刻”，优先使用 anchor(system_datetime)
 - 不允许把这类显式起止区间近似成 rolling
+
+4.3 rolling_minutes
+- op = "rolling_minutes"
+- value: 正整数，单位分钟
+- anchor_expr: 一个 expr 对象，且结果必须是精确时刻
+
+语义：
+- 表示以一个精确时刻为锚点向前回溯 N 分钟，并以该时刻作为结束时刻的精确滚动窗口
+- 例如 system_datetime=2026-04-10 14:37:00 且 value=90 时，表示 2026-04-10 13:07:00 到 2026-04-10 14:37:00
+- 这类表达必须参考 system_datetime，或引用一个 literal_datetime
+
+4.4 rolling_business_days
+- op = "rolling_business_days"
+- region: 字符串，默认使用 "CN"
+- value: 正整数，表示最近 N 个工作日
+- anchor_expr: 一个 expr 对象，且结果必须是单日范围
+- include_anchor: 布尔值；true 表示包含锚日，false 表示从锚日前一个自然日开始回溯
+
+语义：
+- 表示按业务日历向前回溯最近 N 个工作日，结果保持为多段单日集合
+- 例如“最近5个工作日不含今天”
+
+4.5 period_to_date
+- op = "period_to_date"
+- unit: 只允许 day/week/month/quarter/half_year/year
+- anchor_expr: 一个 expr 对象，且结果必须是单日范围或精确时刻
+
+语义：
+- 表示从包含锚点的自然周期起点，到锚点当天结束时刻或锚点精确时刻的 partial range
+- 例如“本月至今”“本季度截至昨天”“本月至当前时刻”
 
 5. calendar_event_range
 - op = "calendar_event_range"
@@ -144,7 +264,8 @@ expr 只允许以下 op：
   - dragon_boat
   - mid_autumn
   - national_day
-- schedule_year: 节假安排年整数
+- schedule_year: 节假安排年整数；当直接给定某一年时使用
+- schedule_year_expr: 一个 expr 对象；当语义是“每年春节 / 每年国庆补班日”这类按 year 集合逐个映射时使用
 - scope: 只允许 "consecutive_rest" 或 "statutory"
 
 语义：
@@ -190,7 +311,8 @@ expr 只允许以下 op：
 - op = "enumerate_makeup_workdays"
 - region: 字符串，默认使用 "CN"
 - event_key: 节日键，必须与业务日日历数据一致
-- schedule_year: 节假安排年整数
+- schedule_year: 节假安排年整数；当直接给定某一年时使用
+- schedule_year_expr: 一个 expr 对象；当语义是“过去3年每年国庆补班日”这类按 year 集合逐个映射时使用
 
 语义：
 - 直接按业务日历枚举某个命名节假日在该 schedule_year 关联的调休补班日
@@ -242,6 +364,7 @@ expr 只允许以下 op：
 8.6 enumerate_subperiods
 - op = "enumerate_subperiods"
 - unit: 只允许 day/week/month/quarter/half_year/year
+- complete_only: 可选布尔值；true 表示只保留完整自然子周期
 - base: 一个 expr 对象
 
 语义：
@@ -255,6 +378,7 @@ expr 只允许以下 op：
 - mode: 只允许 "first" 或 "last"
 - unit: 只允许 day/week/month/quarter/year
 - count: 正整数
+- complete_only: 可选布尔值；true 表示切片前先过滤掉不完整子周期
 - base: 一个 expr 对象
 
 语义：
@@ -267,6 +391,7 @@ expr 只允许以下 op：
 - op = "select_subperiod"
 - unit: 只允许 day/week/month/quarter/half_year/year
 - index: 正整数，从 1 开始编号
+- complete_only: 可选布尔值；true 表示编号前先过滤掉不完整子周期
 - base: 一个 expr 对象
 
 语义：
@@ -309,7 +434,8 @@ week 作为子周期时，统一使用下面的编号规则：
 13. select_occurrence
 - op = "select_occurrence"
 - kind: 只允许 "weekday" 或 "weekend"
-- ordinal: 正整数或 "last"
+- ordinal: 正整数、"last" 或 "nth_from_end"
+- 当 ordinal="nth_from_end" 时，必须额外提供 index，表示倒数第 N 个
 - weekday: 当 kind="weekday" 时必填，1 到 7，1=周一，7=周日；当 kind="weekend" 时不得出现
 - base: 一个 expr 对象，且其结果必须是 month/quarter/half_year/year 之一
 
@@ -336,13 +462,24 @@ week 作为子周期时，统一使用下面的编号规则：
 
 17. select_segment
 - op = "select_segment"
-- mode: 只允许 "first" 或 "last"
+- mode: 只允许 "first"、"last"、"nth"、"nth_from_end"
+- 当 mode 是 "nth" 或 "nth_from_end" 时，必须额外提供 index，且 index 为正整数
 - base: 一个 expr 对象
 
 语义：
-- 用于从一个多段结果里显式取第一段或最后一段
-- 例如“春节调休补班最后一天”“最近一年各月中的第一个月”
+- 用于从一个多段结果里显式取第一段、最后一段、第 N 段或倒数第 N 段
+- 例如“春节调休补班最后一天”“春节调休补班倒数第二天”“最近一年各月中的第一个月”
 - 如果 base 本来就是单一连续区间，则原样返回
+
+17.1 slice_segments
+- op = "slice_segments"
+- mode: 只允许 "first" 或 "last"
+- count: 正整数
+- base: 一个 expr 对象
+
+语义：
+- 用于从一个多段结果里取前 N 段或后 N 段，并保持结果仍然是多段集合
+- 例如“本月前3个工作日”“春节补班后2天”
 
 18. segments_bounds
 - op = "segments_bounds"
@@ -386,34 +523,46 @@ week 作为子周期时，统一使用下面的编号规则：
 - 如果某个表达需要把多段结果转回单个时间窗口，必须显式使用 select_segment 或 segments_bounds，不要隐式合并
 - 如果问题要求分别返回多个子周期结果，通常必须拆成多个独立 time_expression
 - 但如果父区间是 rolling，且要求把 rolling 区间内全部自然子周期都列出来，优先输出 1 个 enumerate_subperiods
+- 如果问题是“本月至今 / 本季度至今 / 本年截至昨天 / 本月至当前时刻”这类 partial current period，优先使用 period_to_date，不要手工拼 bounded_range(current_period(...), ...)
 - 如果问题本身是显式起止区间，例如“2025年4月到至今”“从2026年4月1日到今天”，必须优先输出 bounded_range
+- 显式日期优先使用 literal_date；显式时刻优先使用 literal_datetime
 - 如果问题只要求整体结果，则应输出能表示整体时间范围的最简 time_expression
 - 如果时间表达形如“X前N个Y / X的前N个Y / X后N个Y / X的后N个Y”，其中 X 是较大时间范围、Y 是较小子周期，则整体查询必须使用 slice_subperiods
 - 这类表达不得解析为 rolling，不得以 system_date 直接作为锚点
 - 如果这类表达带有“分别”“各自”“依次”“每个”等语义，并且需要分别计算多个子时间窗口，则不要输出一个 slice_subperiods，而要拆成多个独立 time_expression
 - 如果问题是 rolling 父区间下的“各月分别 / 各周分别 / 每天分别 / 各季度分别 / 每年分别”这类全量枚举，不要手工展开成很多个 select_subperiod，优先输出 enumerate_subperiods
+- “最近10天每天”“过去两年每个季度”“本月至今每天”这类自然子周期枚举，也优先输出 enumerate_subperiods，不要误判成不支持
 - rolling 父区间允许按与自身相同的自然粒度切分，例如“过去3年每年”“最近3个月每月”“最近2周每周”
 - 如果问题是显式起止区间下的“各月分别 / 每周分别 / 各季度分别 / 每天分别 / 各年分别”，也优先输出 enumerate_subperiods，但其 base 必须是 bounded_range
+- “过去3年每年第一季度 / 近5年每年3月” 这类 year 集合上的映射选择，必须先得到 year 集合，再对该集合使用 select_quarter / select_month
+- “过去3年每年春节假期 / 近5年每年国庆补班日” 这类 year 集合上的节假日映射，必须使用 schedule_year_expr
 - 对于拆分后的每个子时间窗口，优先使用 select_subperiod；不要把“第二周”错误表示成“前两周”
 - “X的第N个Y / X第一周 / X第二周 / X第一个月 / X第一个季度”这类表达，必须使用 select_subperiod，除非已有更直接且完全等价的专用选择 op
+- “完整月份 / 完整季度 / 完整周” 这类显式要求忽略首尾 partial 子周期的表达，必须在 enumerate_subperiods / select_subperiod / slice_subperiods 上设置 complete_only=true
 - “第N个周二 / 最后一个周日 / 第N个周末 / 最后一个周末” 这类父周期内按出现次数选择的表达，必须使用 select_occurrence
+- “倒数第二个周末 / 倒数第三个周五” 这类反向 occurrence，必须使用 select_occurrence 且 ordinal="nth_from_end"
 - “第N周的周二 / 第N周的周末” 这类周内选择表达，必须先使用 select_subperiod 选出第 N 周，再用 select_weekday 或 select_weekend
 - select_weekday 只能用于 week base；不要把 month/quarter/year 直接作为 select_weekday 的 base
 - “去年国庆假期 / 今年春节假期 / 去年中秋法定假期” 这类命名节假日区间，必须优先使用 calendar_event_range
 - “假期开始日 / 假期结束日” 这类边界表达，必须使用 range_edge
-- “端午节当天 / 国庆节当天 / 中秋节当天”等「某节当天」且该节国务院安排为连续多日放假时：先用 calendar_event_range(region, event_key, schedule_year, consecutive_rest) 表示该节连休，再用 range_edge(edge="start", base=...) 取连休首日作为「正日」当日（现行安排下端午、中秋等与连休首日一致）；不要凭空 select_month 猜公历；若日历 JSON 已为该节维护 scope=statutory 且仅为正日一天，也可用 statutory 代替上述组合
+- “端午节当天 / 国庆节当天 / 中秋节当天 / 清明节当天”等「某节当天 / 正日 / 当日」查询，优先使用 calendar_event_range(region, event_key, schedule_year, statutory)；不要再把它近似成 consecutive_rest 首日
 - “节前最后一个工作日 / 节后第一个工作日” 这类业务日表达，必须使用 business_day_offset，并以单日 base 为锚点
 - “某个月的工作日 / 休息日 / 节假日” 这类范围内按业务日历筛选日期的表达，必须使用 enumerate_calendar_days
+- 对“去年国庆假期前最后一个工作日”这类节前/节后边界工作日问题，禁止把这类问题解析成 enumerate_calendar_days；必须优先使用 business_day_offset
 - “某节调休上班日 / 某节补班日 / 某节调休补班是哪些日期” 这类表达，必须使用 enumerate_makeup_workdays
-- 禁止把这类问题解析成 enumerate_calendar_days；不要先构造 calendar_event_range(..., consecutive_rest) 再枚举 workday
+- “本月前3个工作日 / 最后2个补班日” 这类从多段结果里取前后 N 段的表达，必须使用 slice_segments
+- 但如果语义是“假期内第一个工作日 / 假期内最后两个休息日 / 某月第一个工作日”这类先在父区间内部筛选工作日/休息日/节假日再取成员的表达，必须先用 enumerate_calendar_days 过滤，再用 select_segment 或 slice_segments 选择成员
 - “工作日” 对应 day_kind="workday"
 - “休息日” 对应 day_kind="restday"
 - “节假日” 对应 day_kind="holiday"
 - “A到B / 从A到B / A至B / A到至今 / A截至今天” 这类显式区间，必须使用 bounded_range
 - “到至今 / 到今天 / 截至今天 / 到当前” 作为终点时，优先使用 anchor(system_date)
+- “到现在 / 到当前时刻 / 到此刻” 作为终点时，优先使用 anchor(system_datetime)
 - 禁止把“2025年4月到至今各月”这类问题近似成 rolling(month, N) 再枚举 month
 - “本小时 / 当前小时” 必须使用 current_hour
 - “最近24小时 / 近6小时 / 过去48小时” 这类精确滚动小时窗口，必须使用 rolling_hours
+- “最近90分钟 / 近15分钟 / 过去30分钟” 这类精确滚动分钟窗口，必须使用 rolling_minutes
+- “最近5个工作日 / 最近10个工作日不含今天” 这类工作日滚动窗口，必须使用 rolling_business_days
 - “最近24小时每小时 / 近6小时各小时 / 过去48小时逐小时” 这类滚动小时窗口内的全量小时枚举，必须使用 enumerate_hours，且其 base 必须是 rolling_hours
 - “今天23点 / 昨天14点” 这类自然日内整点小时表达，必须使用 select_hour
 - “今天前6小时 / 昨天后3小时” 这类自然日内连续小时范围，必须使用 slice_hours
@@ -1106,6 +1255,246 @@ week 作为子周期时，统一使用下面的编号规则：
   ]
 }
 
+标准输出样例26：
+问题：本月至今的收益是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "本月至今",
+      "expr": {
+        "op": "period_to_date",
+        "unit": "month",
+        "anchor_expr": {
+          "op": "anchor",
+          "name": "system_date"
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例27：
+问题：2026年4月1日到现在的收益是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "2026年4月1日到现在",
+      "expr": {
+        "op": "bounded_range",
+        "start": {
+          "op": "literal_date",
+          "date": "2026-04-01"
+        },
+        "end": {
+          "op": "anchor",
+          "name": "system_datetime"
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例28：
+问题：最近90分钟的收益是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "最近90分钟",
+      "expr": {
+        "op": "rolling_minutes",
+        "value": 90,
+        "anchor_expr": {
+          "op": "anchor",
+          "name": "system_datetime"
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例29：
+问题：最近5个工作日不含今天的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "最近5个工作日不含今天",
+      "expr": {
+        "op": "rolling_business_days",
+        "region": "CN",
+        "value": 5,
+        "anchor_expr": {
+          "op": "anchor",
+          "name": "system_date"
+        },
+        "include_anchor": false
+      }
+    }
+  ]
+}
+
+标准输出样例30：
+问题：2025年春节调休补班倒数第二天是哪天
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "2025年春节调休补班倒数第二天",
+      "expr": {
+        "op": "select_segment",
+        "mode": "nth_from_end",
+        "index": 2,
+        "base": {
+          "op": "enumerate_makeup_workdays",
+          "region": "CN",
+          "event_key": "spring_festival",
+          "schedule_year": 2025
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例31：
+问题：最近10天每天的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "最近10天每天",
+      "expr": {
+        "op": "enumerate_subperiods",
+        "unit": "day",
+        "base": {
+          "op": "rolling",
+          "unit": "day",
+          "value": 10,
+          "anchor": "system_date"
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例32：
+问题：过去两年每个季度的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "过去两年每个季度",
+      "expr": {
+        "op": "enumerate_subperiods",
+        "unit": "quarter",
+        "base": {
+          "op": "rolling",
+          "unit": "year",
+          "value": 2,
+          "anchor": "system_date"
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例33：
+问题：过去3年每年第一季度的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "过去3年每年第一季度",
+      "expr": {
+        "op": "select_quarter",
+        "quarter": 1,
+        "base": {
+          "op": "enumerate_subperiods",
+          "unit": "year",
+          "base": {
+            "op": "rolling",
+            "unit": "year",
+            "value": 3,
+            "anchor": "system_date"
+          }
+        }
+      }
+    }
+  ]
+}
+
+标准输出样例34：
+问题：过去3年每年春节假期分别是多少天
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "过去3年每年",
+      "expr": {
+        "op": "enumerate_subperiods",
+        "unit": "year",
+        "base": {
+          "op": "rolling",
+          "unit": "year",
+          "value": 3,
+          "anchor": "system_date"
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "text": "过去3年每年春节假期",
+      "expr": {
+        "op": "calendar_event_range",
+        "region": "CN",
+        "event_key": "spring_festival",
+        "schedule_year_expr": {
+          "op": "reference",
+          "ref": "t1"
+        },
+        "scope": "consecutive_rest"
+      }
+    }
+  ]
+}
+
+标准输出样例35：
+问题：本月前3个工作日的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "本月前3个工作日",
+      "expr": {
+        "op": "slice_segments",
+        "mode": "first",
+        "count": 3,
+        "base": {
+          "op": "enumerate_calendar_days",
+          "region": "CN",
+          "day_kind": "workday",
+          "base": {
+            "op": "current_period",
+            "unit": "month"
+          }
+        }
+      }
+    }
+  ]
+}
+
 依赖表达示例：
 {
   "time_expressions": [
@@ -1286,13 +1675,19 @@ class QueryParser:
                 raise ValueError("LLM returned invalid JSON after repair attempt.") from exc
 
         payload = self._normalize_recent_hours_payload(payload, query)
+        payload = self._normalize_pre_validate_payload(payload)
         parsed = self._normalize_no_time_parse(ParsedTimeExpressions.model_validate(payload))
         parsed = self._normalize_legacy_rolling_expressions(parsed)
+        parsed = self._normalize_literal_period_expressions(parsed)
+        parsed = self._normalize_continuous_range_slice_segments(parsed)
+        parsed = self._normalize_business_calendar_semantics(parsed, query, system_date, system_datetime)
         parsed = self._normalize_irrelevant_rolling_flag(parsed)
         if self._parsed_contains_current_hour(parsed) and system_datetime is None:
             raise ValueError("current_hour requires system_datetime.")
         if self._parsed_contains_rolling_hours(parsed) and system_datetime is None:
             raise ValueError("rolling_hours requires system_datetime.")
+        if self._parsed_contains_system_datetime_anchor(parsed) and system_datetime is None:
+            raise ValueError("anchor(system_datetime) requires system_datetime.")
         if not self._parsed_contains_rolling(parsed):
             return parsed
 
@@ -1423,10 +1818,19 @@ class QueryParser:
                     "anchor_expr": {"op": "anchor", "name": "system_date"},
                     "include_anchor": default_include_anchor,
                 }
-        return {
+        normalized = {
             key: cls._normalize_nested_expr_payload(value, default_include_anchor)
             for key, value in expr_payload.items()
         }
+        if normalized.get("op") in {"calendar_event_range", "enumerate_makeup_workdays"} and isinstance(
+            normalized.get("schedule_year"),
+            Mapping,
+        ):
+            normalized["schedule_year_expr"] = cls._normalize_nested_expr_payload(
+                normalized.pop("schedule_year"),
+                default_include_anchor,
+            )
+        return normalized
 
     @classmethod
     def _normalize_legacy_rolling_expressions(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
@@ -1439,6 +1843,294 @@ class QueryParser:
             for item in payload["time_expressions"]
         ]
         return ParsedTimeExpressions.model_validate(payload)
+
+    @classmethod
+    def _normalize_pre_validate_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        default_include_anchor = bool(payload.get("rolling_includes_today", False))
+        normalized = dict(payload)
+        normalized["time_expressions"] = [
+            {
+                **item,
+                "expr": cls._normalize_legacy_rolling_expr_payload(dict(item["expr"]), default_include_anchor),
+            }
+            for item in normalized.get("time_expressions") or []
+        ]
+        return normalized
+
+    @classmethod
+    def _normalize_literal_period_expressions(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        changed = False
+        for item in payload["time_expressions"]:
+            literal_expr = cls._literal_period_expr_from_text(item["text"])
+            if literal_expr is None:
+                continue
+            if item["expr"] != literal_expr:
+                item["expr"] = literal_expr
+                changed = True
+        if not changed:
+            return parsed
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @staticmethod
+    def _literal_period_expr_from_text(text: str) -> dict[str, Any] | None:
+        month_match = ABSOLUTE_MONTH_PATTERN.fullmatch(text)
+        if month_match is not None:
+            return {
+                "op": "literal_period",
+                "unit": "month",
+                "year": int(month_match.group("year")),
+                "month": int(month_match.group("month")),
+            }
+        quarter_match = ABSOLUTE_QUARTER_PATTERN.fullmatch(text)
+        if quarter_match is not None:
+            quarter_token = quarter_match.group("quarter")
+            quarter_mapping = {"一": 1, "二": 2, "三": 3, "四": 4}
+            quarter = quarter_mapping[quarter_token] if quarter_token in quarter_mapping else int(quarter_token)
+            return {
+                "op": "literal_period",
+                "unit": "quarter",
+                "year": int(quarter_match.group("year")),
+                "quarter": quarter,
+            }
+        half_year_match = ABSOLUTE_HALF_YEAR_PATTERN.fullmatch(text)
+        if half_year_match is not None:
+            return {
+                "op": "literal_period",
+                "unit": "half_year",
+                "year": int(half_year_match.group("year")),
+                "half": 1 if half_year_match.group("half") == "上" else 2,
+            }
+        year_match = ABSOLUTE_YEAR_PATTERN.fullmatch(text)
+        if year_match is not None:
+            return {
+                "op": "literal_period",
+                "unit": "year",
+                "year": int(year_match.group("year")),
+            }
+        return None
+
+    @classmethod
+    def _normalize_continuous_range_slice_segments(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        changed = False
+        for item in payload["time_expressions"]:
+            expr = item["expr"]
+            if expr.get("op") != "slice_segments":
+                continue
+            base = expr.get("base")
+            if not isinstance(base, Mapping):
+                continue
+            if not cls._is_continuous_range_base_payload(base):
+                continue
+            unit = cls._infer_subperiod_unit_from_text(item["text"])
+            if unit is None:
+                continue
+            item["expr"] = {
+                "op": "slice_subperiods",
+                "mode": expr["mode"],
+                "unit": unit,
+                "count": expr["count"],
+                "base": base,
+            }
+            changed = True
+        if not changed:
+            return parsed
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @classmethod
+    def _normalize_business_calendar_semantics(
+        cls,
+        parsed: ParsedTimeExpressions,
+        query: str,
+        system_date: str | None,
+        system_datetime: str | None,
+    ) -> ParsedTimeExpressions:
+        current_year = int(_effective_system_date(system_date, system_datetime)[:4])
+        payload = parsed.model_dump(mode="python")
+        changed = False
+        for item in payload["time_expressions"]:
+            text = item["text"].strip()
+            expr = cls._holiday_statutory_expr_from_text(text, current_year)
+            if expr is None:
+                expr = cls._calendar_filter_selection_expr_from_text(text, current_year)
+            if expr is None:
+                continue
+            if item["expr"] != expr:
+                item["expr"] = expr
+                changed = True
+        if not changed:
+            return parsed
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @classmethod
+    def _holiday_statutory_expr_from_text(cls, text: str, current_year: int) -> dict[str, Any] | None:
+        match = HOLIDAY_DAY_PATTERN.fullmatch(text)
+        if match is None:
+            return None
+        holiday = match.group("holiday")
+        event_key = HOLIDAY_EVENT_KEY_BY_TEXT[holiday]
+        schedule_year = cls._resolve_text_year(match.group("relative"), match.group("year"), current_year)
+        return {
+            "op": "calendar_event_range",
+            "region": "CN",
+            "event_key": event_key,
+            "schedule_year": schedule_year,
+            "scope": "statutory",
+        }
+
+    @classmethod
+    def _calendar_filter_selection_expr_from_text(cls, text: str, current_year: int) -> dict[str, Any] | None:
+        holiday_match = HOLIDAY_FILTER_SELECTION_PATTERN.fullmatch(text)
+        if holiday_match is not None:
+            base_expr = {
+                "op": "calendar_event_range",
+                "region": "CN",
+                "event_key": HOLIDAY_EVENT_KEY_BY_TEXT[holiday_match.group("holiday")],
+                "schedule_year": cls._resolve_text_year(
+                    holiday_match.group("relative"),
+                    holiday_match.group("year"),
+                    current_year,
+                ),
+                "scope": "consecutive_rest",
+            }
+            return cls._build_calendar_filter_selection_expr(
+                base_expr=base_expr,
+                day_kind=holiday_match.group("day_kind"),
+                ordinal=holiday_match.group("ordinal"),
+                slice_mode=holiday_match.group("slice_mode"),
+                count_token=holiday_match.group("count"),
+            )
+
+        month_match = MONTH_FILTER_SELECTION_PATTERN.fullmatch(text)
+        if month_match is None:
+            return None
+        base_expr = cls._month_base_expr_from_text(month_match.group("base"), current_year)
+        if base_expr is None:
+            return None
+        return cls._build_calendar_filter_selection_expr(
+            base_expr=base_expr,
+            day_kind=month_match.group("day_kind"),
+            ordinal=month_match.group("ordinal"),
+            slice_mode=month_match.group("slice_mode"),
+            count_token=month_match.group("count"),
+        )
+
+    @classmethod
+    def _build_calendar_filter_selection_expr(
+        cls,
+        *,
+        base_expr: dict[str, Any],
+        day_kind: str,
+        ordinal: str | None,
+        slice_mode: str | None,
+        count_token: str | None,
+    ) -> dict[str, Any]:
+        filtered = {
+            "op": "enumerate_calendar_days",
+            "region": "CN",
+            "day_kind": CALENDAR_DAY_KIND_BY_TEXT[day_kind],
+            "base": base_expr,
+        }
+        if ordinal == "第一个":
+            return {"op": "select_segment", "mode": "first", "base": filtered}
+        if ordinal == "最后一个":
+            return {"op": "select_segment", "mode": "last", "base": filtered}
+        if ordinal == "倒数第二个":
+            return {"op": "select_segment", "mode": "nth_from_end", "index": 2, "base": filtered}
+        assert slice_mode is not None and count_token is not None
+        return {
+            "op": "slice_segments",
+            "mode": "first" if slice_mode == "前" else "last",
+            "count": cls._parse_small_count(count_token),
+            "base": filtered,
+        }
+
+    @classmethod
+    def _month_base_expr_from_text(cls, text: str, current_year: int) -> dict[str, Any] | None:
+        text = text.strip()
+        literal = cls._literal_period_expr_from_text(text)
+        if literal is not None:
+            return literal
+        if text == "本月":
+            return {"op": "current_period", "unit": "month"}
+        if text in {"上月", "上个月"}:
+            return {
+                "op": "shift",
+                "unit": "month",
+                "value": -1,
+                "base": {"op": "current_period", "unit": "month"},
+            }
+        if text in {"下月", "下个月"}:
+            return {
+                "op": "shift",
+                "unit": "month",
+                "value": 1,
+                "base": {"op": "current_period", "unit": "month"},
+            }
+        return None
+
+    @staticmethod
+    def _resolve_text_year(relative: str | None, explicit_year: str | None, current_year: int) -> int:
+        if explicit_year is not None:
+            return int(explicit_year)
+        if relative == "去年":
+            return current_year - 1
+        if relative == "明年":
+            return current_year + 1
+        return current_year
+
+    @staticmethod
+    def _parse_small_count(token: str) -> int:
+        if token.isdigit():
+            return int(token)
+        if token in CHINESE_SMALL_NUMBER:
+            return CHINESE_SMALL_NUMBER[token]
+        if token == "十一":
+            return 11
+        if token == "十二":
+            return 12
+        raise ValueError(f"Unsupported count token: {token}")
+
+    @staticmethod
+    def _is_continuous_range_base_payload(base: Mapping[str, Any]) -> bool:
+        return base.get("op") in {
+            "anchor",
+            "bounded_range",
+            "calendar_event_range",
+            "current_period",
+            "literal_date",
+            "literal_datetime",
+            "literal_period",
+            "period_to_date",
+            "rolling",
+            "rolling_business_days",
+            "rolling_hours",
+            "rolling_minutes",
+            "segments_bounds",
+            "select_half_year",
+            "select_month",
+            "select_quarter",
+            "select_subperiod",
+            "shift",
+            "slice_subperiods",
+        }
+
+    @staticmethod
+    def _infer_subperiod_unit_from_text(text: str) -> str | None:
+        if "季度" in text:
+            return "quarter"
+        if "半年" in text:
+            return "half_year"
+        if "周" in text or "星期" in text:
+            return "week"
+        if "月" in text:
+            return "month"
+        if "天" in text or "日" in text:
+            return "day"
+        if "年" in text:
+            return "year"
+        return None
 
     @classmethod
     def _first_rolling_include_anchor(cls, expr: Any) -> bool | None:
@@ -1611,6 +2303,23 @@ class QueryParser:
                 if any(cls._expr_contains_rolling_hours(item) for item in value if hasattr(item, "op")):
                     return True
             elif hasattr(value, "op") and cls._expr_contains_rolling_hours(value):
+                return True
+        return False
+
+    @classmethod
+    def _parsed_contains_system_datetime_anchor(cls, parsed: ParsedTimeExpressions) -> bool:
+        return any(cls._expr_contains_system_datetime_anchor(item.expr) for item in parsed.time_expressions)
+
+    @classmethod
+    def _expr_contains_system_datetime_anchor(cls, expr: Any) -> bool:
+        if getattr(expr, "op", None) == "anchor" and getattr(expr, "name", None) == "system_datetime":
+            return True
+
+        for value in vars(expr).values():
+            if isinstance(value, list):
+                if any(cls._expr_contains_system_datetime_anchor(item) for item in value if hasattr(item, "op")):
+                    return True
+            elif hasattr(value, "op") and cls._expr_contains_system_datetime_anchor(value):
                 return True
         return False
 

@@ -11,6 +11,7 @@ class StrictModel(BaseModel):
 
 
 TimeUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
+LiteralPeriodUnit = Literal["year", "month", "quarter", "half_year"]
 SliceMode = Literal["first", "last"]
 SliceUnit = Literal["day", "week", "month", "quarter", "year"]
 SelectSubperiodUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
@@ -18,16 +19,71 @@ EnumerateSubperiodUnit = SelectSubperiodUnit
 CalendarEventScope = Literal["consecutive_rest", "statutory"]
 RangeEdge = Literal["start", "end"]
 CalendarDayKind = Literal["workday", "restday", "holiday"]
+AnchorName = Literal["system_date", "system_datetime"]
+SelectSegmentMode = Literal["first", "last", "nth", "nth_from_end"]
 
 
 class AnchorExpr(StrictModel):
     op: Literal["anchor"]
-    name: Literal["system_date"]
+    name: AnchorName
 
 
 class CurrentPeriodExpr(StrictModel):
     op: Literal["current_period"]
     unit: TimeUnit
+
+
+class LiteralDateExpr(StrictModel):
+    op: Literal["literal_date"]
+    date: str
+
+    @model_validator(mode="after")
+    def validate_date_format(self) -> "LiteralDateExpr":
+        datetime.strptime(self.date, "%Y-%m-%d")
+        return self
+
+
+class LiteralDatetimeExpr(StrictModel):
+    op: Literal["literal_datetime"]
+    datetime: str
+
+    @model_validator(mode="after")
+    def validate_datetime_format(self) -> "LiteralDatetimeExpr":
+        datetime.strptime(self.datetime, "%Y-%m-%d %H:%M:%S")
+        return self
+
+
+class LiteralPeriodExpr(StrictModel):
+    op: Literal["literal_period"]
+    unit: LiteralPeriodUnit
+    year: int
+    month: int | None = Field(default=None, ge=1, le=12)
+    quarter: int | None = Field(default=None, ge=1, le=4)
+    half: int | None = Field(default=None, ge=1, le=2)
+
+    @model_validator(mode="after")
+    def validate_fields_for_unit(self) -> "LiteralPeriodExpr":
+        if self.unit == "year":
+            if any(value is not None for value in (self.month, self.quarter, self.half)):
+                raise ValueError("literal_period year must not include month, quarter, or half")
+            return self
+        if self.unit == "month":
+            if self.month is None:
+                raise ValueError("literal_period month requires month")
+            if self.quarter is not None or self.half is not None:
+                raise ValueError("literal_period month must not include quarter or half")
+            return self
+        if self.unit == "quarter":
+            if self.quarter is None:
+                raise ValueError("literal_period quarter requires quarter")
+            if self.month is not None or self.half is not None:
+                raise ValueError("literal_period quarter must not include month or half")
+            return self
+        if self.half is None:
+            raise ValueError("literal_period half_year requires half")
+        if self.month is not None or self.quarter is not None:
+            raise ValueError("literal_period half_year must not include month or quarter")
+        return self
 
 
 class ShiftExpr(StrictModel):
@@ -61,18 +117,47 @@ class RollingHoursExpr(StrictModel):
     value: int = Field(ge=1)
 
 
+class RollingMinutesExpr(StrictModel):
+    op: Literal["rolling_minutes"]
+    value: int = Field(ge=1)
+    anchor_expr: "Expr"
+
+
+class RollingBusinessDaysExpr(StrictModel):
+    op: Literal["rolling_business_days"]
+    region: str = "CN"
+    value: int = Field(ge=1)
+    anchor_expr: "Expr"
+    include_anchor: StrictBool = False
+
+
 class BoundedRangeExpr(StrictModel):
     op: Literal["bounded_range"]
     start: "Expr"
     end: "Expr"
 
 
+class PeriodToDateExpr(StrictModel):
+    op: Literal["period_to_date"]
+    unit: TimeUnit
+    anchor_expr: "Expr"
+
+
 class CalendarEventRangeExpr(StrictModel):
     op: Literal["calendar_event_range"]
     region: str = "CN"
     event_key: str
-    schedule_year: int
+    schedule_year: int | None = Field(default=None, exclude_if=lambda value: value is None)
+    schedule_year_expr: Expr | None = Field(default=None, exclude_if=lambda value: value is None)
     scope: CalendarEventScope
+
+    @model_validator(mode="after")
+    def validate_schedule_year_fields(self) -> "CalendarEventRangeExpr":
+        has_scalar_year = self.schedule_year is not None
+        has_expr_year = self.schedule_year_expr is not None
+        if has_scalar_year == has_expr_year:
+            raise ValueError("calendar_event_range requires exactly one of schedule_year or schedule_year_expr")
+        return self
 
 
 class RangeEdgeExpr(StrictModel):
@@ -105,7 +190,16 @@ class EnumerateMakeupWorkdaysExpr(StrictModel):
     op: Literal["enumerate_makeup_workdays"]
     region: str = "CN"
     event_key: str
-    schedule_year: int
+    schedule_year: int | None = Field(default=None, exclude_if=lambda value: value is None)
+    schedule_year_expr: Expr | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def validate_schedule_year_fields(self) -> "EnumerateMakeupWorkdaysExpr":
+        has_scalar_year = self.schedule_year is not None
+        has_expr_year = self.schedule_year_expr is not None
+        if has_scalar_year == has_expr_year:
+            raise ValueError("enumerate_makeup_workdays requires exactly one of schedule_year or schedule_year_expr")
+        return self
 
 
 class CurrentHourExpr(StrictModel):
@@ -161,8 +255,18 @@ class SelectHalfYearExpr(StrictModel):
 
 class SelectSegmentExpr(StrictModel):
     op: Literal["select_segment"]
-    mode: SliceMode
+    mode: SelectSegmentMode
+    index: int | None = Field(default=None, ge=1)
     base: "Expr"
+
+    @model_validator(mode="after")
+    def validate_index_requirements(self) -> "SelectSegmentExpr":
+        requires_index = self.mode in {"nth", "nth_from_end"}
+        if requires_index and self.index is None:
+            raise ValueError("select_segment index is required when mode is nth or nth_from_end")
+        if not requires_index and self.index is not None:
+            raise ValueError("select_segment index must be omitted when mode is first or last")
+        return self
 
 
 class SegmentsBoundsExpr(StrictModel):
@@ -174,23 +278,26 @@ class SelectSubperiodExpr(StrictModel):
     op: Literal["select_subperiod"]
     unit: SelectSubperiodUnit
     index: int = Field(ge=1)
+    complete_only: StrictBool = False
     base: "Expr"
 
 
 class EnumerateSubperiodsExpr(StrictModel):
     op: Literal["enumerate_subperiods"]
     unit: EnumerateSubperiodUnit
+    complete_only: StrictBool = False
     base: "Expr"
 
 
 OccurrenceKind = Literal["weekday", "weekend"]
-OccurrenceOrdinal = Literal["last"] | Annotated[int, Field(ge=1)]
+OccurrenceOrdinal = Literal["last", "nth_from_end"] | Annotated[int, Field(ge=1)]
 
 
 class SelectOccurrenceExpr(StrictModel):
     op: Literal["select_occurrence"]
     kind: OccurrenceKind
     ordinal: OccurrenceOrdinal
+    index: int | None = Field(default=None, ge=1)
     weekday: int | None = Field(default=None, ge=1, le=7)
     base: "Expr"
 
@@ -200,6 +307,10 @@ class SelectOccurrenceExpr(StrictModel):
             raise ValueError("weekday is required when kind=weekday")
         if self.kind == "weekend" and self.weekday is not None:
             raise ValueError("weekday must be omitted when kind=weekend")
+        if self.ordinal == "nth_from_end" and self.index is None:
+            raise ValueError("index is required when ordinal=nth_from_end")
+        if self.ordinal != "nth_from_end" and self.index is not None:
+            raise ValueError("index must be omitted unless ordinal=nth_from_end")
         return self
 
 
@@ -213,16 +324,30 @@ class SliceSubperiodsExpr(StrictModel):
     mode: SliceMode
     unit: SliceUnit
     count: int = Field(ge=1)
+    complete_only: StrictBool = False
+    base: "Expr"
+
+
+class SliceSegmentsExpr(StrictModel):
+    op: Literal["slice_segments"]
+    mode: SliceMode
+    count: int = Field(ge=1)
     base: "Expr"
 
 
 Expr = Annotated[
     AnchorExpr
     | CurrentPeriodExpr
+    | LiteralDateExpr
+    | LiteralDatetimeExpr
+    | LiteralPeriodExpr
     | ShiftExpr
     | RollingExpr
     | RollingHoursExpr
+    | RollingMinutesExpr
+    | RollingBusinessDaysExpr
     | BoundedRangeExpr
+    | PeriodToDateExpr
     | CalendarEventRangeExpr
     | RangeEdgeExpr
     | BusinessDayOffsetExpr
@@ -243,13 +368,18 @@ Expr = Annotated[
     | EnumerateSubperiodsExpr
     | SelectOccurrenceExpr
     | ReferenceExpr
-    | SliceSubperiodsExpr,
+    | SliceSubperiodsExpr
+    | SliceSegmentsExpr,
     Field(discriminator="op"),
 ]
 
 ShiftExpr.model_rebuild()
 RollingExpr.model_rebuild()
+LiteralPeriodExpr.model_rebuild()
+RollingMinutesExpr.model_rebuild()
+RollingBusinessDaysExpr.model_rebuild()
 BoundedRangeExpr.model_rebuild()
+PeriodToDateExpr.model_rebuild()
 RangeEdgeExpr.model_rebuild()
 BusinessDayOffsetExpr.model_rebuild()
 EnumerateCalendarDaysExpr.model_rebuild()
@@ -268,6 +398,7 @@ SelectSubperiodExpr.model_rebuild()
 EnumerateSubperiodsExpr.model_rebuild()
 SelectOccurrenceExpr.model_rebuild()
 SliceSubperiodsExpr.model_rebuild()
+SliceSegmentsExpr.model_rebuild()
 
 
 class TimeExpression(StrictModel):
@@ -301,14 +432,49 @@ class ResolvedTimeExpression(StrictModel):
     is_partial: bool | None = None
 
 
+class ResolvedTimeExpressionGroup(StrictModel):
+    id: str
+    text: str
+    source_id: str | None = None
+    source_text: str | None = None
+    start_time: str
+    end_time: str
+    timezone: str
+    is_partial: bool | None = None
+    children: list["ResolvedTimeExpressionGroup"] = Field(default_factory=list)
+
+
+class RewriteHint(StrictModel):
+    topology: Literal["discrete_set"]
+    member_grain: str
+    is_contiguous: bool
+    preferred_rendering: Literal["default", "member_list"]
+
+
+class NoMatchResult(StrictModel):
+    source_id: str
+    source_text: str
+    reason: Literal["calendar_filter_empty"]
+    expr_op: str
+    day_kind: CalendarDayKind | Literal["makeup_workday"] | None = None
+    event_key: str | None = None
+    schedule_year: int | None = None
+
+
 class ResolvedMetadata(StrictModel):
     calendar_version: str | None = None
     enumerated_counts: dict[str, int] | None = None
+    rewrite_hints: dict[str, RewriteHint] | None = None
+    no_match_results: list[NoMatchResult] | None = None
 
 
 class ResolvedTimeExpressions(StrictModel):
     resolved_time_expressions: list[ResolvedTimeExpression] = Field(default_factory=list)
+    resolved_time_expression_groups: list[ResolvedTimeExpressionGroup] = Field(default_factory=list)
     metadata: ResolvedMetadata | None = None
+
+
+ResolvedTimeExpressionGroup.model_rebuild()
 
 
 class TemporalContextRequest(StrictModel):
@@ -348,7 +514,7 @@ class RewriteQueryRequest(StrictModel):
 
 
 class RewriteQueryResponse(StrictModel):
-    rewritten_query: str
+    rewritten_query: str | None
 
 
 class PipelineRequest(TemporalContextRequest):

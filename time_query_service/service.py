@@ -86,7 +86,7 @@ class QueryPipelineService:
             business_calendar=self._business_calendar,
         )
 
-    def rewrite_query(self, *, original_query: str, resolved_time_expressions: dict[str, Any]) -> str:
+    def rewrite_query(self, *, original_query: str, resolved_time_expressions: dict[str, Any]) -> str | None:
         return self.rewriter.rewrite_query_with_llm(
             original_query=original_query,
             resolved_time_expressions=resolved_time_expressions,
