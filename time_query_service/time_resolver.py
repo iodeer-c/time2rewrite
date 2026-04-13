@@ -490,6 +490,9 @@ def _is_year_valued(base: TimeRange) -> bool:
 
 
 def _require_single_year_base(base: TemporalValue, op_name: str) -> TimeRange:
+    # Absolute week expressions such as `2026年第3周` are modeled as
+    # `select_subperiod(unit="week", index=3, base=literal_period(unit="year", year=2026))`,
+    # so any single natural year range must be accepted as a valid week parent.
     if not isinstance(base, TimeRange) or not _is_year_valued(base):
         raise ValueError(f"{op_name} requires a year-valued base.")
     return base
@@ -509,22 +512,71 @@ def _extract_year_members(base: TemporalValue, op_name: str) -> list[TimeRange]:
     raise ValueError(f"{op_name} requires a year-valued base.")
 
 
+def _clip_range_to_window(mapped: TimeRange, window: TimeRange) -> TimeRange | None:
+    overlap_start = max(mapped.start, window.start)
+    overlap_end = min(mapped.end, window.end)
+    if overlap_start > overlap_end:
+        return None
+    if overlap_start == mapped.start and overlap_end == mapped.end:
+        return mapped
+    natural_grain = mapped.natural_grain or mapped.grain
+    return TimeRange(
+        overlap_start,
+        overlap_end,
+        grain=None,
+        slicing_grain=mapped.slicing_grain,
+        is_partial=True,
+        natural_grain=natural_grain,
+    )
+
+
+def _bound_year_mapped_value(source_member: TimeRange, value: TemporalValue) -> TemporalValue:
+    if isinstance(value, TimeRange):
+        clipped = _clip_range_to_window(value, source_member)
+        if clipped is None:
+            return TimeSegmentSet(tuple())
+        return clipped
+    if isinstance(value, TimeSegmentSet):
+        clipped_members = [
+            clipped
+            for member in value.members
+            if (clipped := _clip_range_to_window(member, source_member)) is not None
+        ]
+        return TimeSegmentSet(tuple(clipped_members))
+
+    bounded_groups: list[TimeGroup] = []
+    for group in value.groups:
+        clipped_parent = _clip_range_to_window(group.parent, source_member)
+        if clipped_parent is None:
+            continue
+        clipped_value = _bound_year_mapped_value(clipped_parent, group.value)
+        if _has_temporal_members(clipped_value):
+            bounded_groups.append(TimeGroup(parent=clipped_parent, value=clipped_value))
+    return TimeGroupedSet(tuple(bounded_groups))
+
+
 def _map_year_valued_base(
     base: TemporalValue,
     op_name: str,
     fn: Callable[[TimeRange], TemporalValue],
 ) -> TemporalValue:
     if isinstance(base, TimeGroupedSet):
-        return TimeGroupedSet(
-            tuple(
-                TimeGroup(parent=group.parent, value=_map_year_valued_base(group.value, op_name, fn))
-                for group in base.groups
-            )
-        )
+        bounded_groups: list[TimeGroup] = []
+        for group in base.groups:
+            mapped_value = _map_year_valued_base(group.value, op_name, fn)
+            if _has_temporal_members(mapped_value):
+                bounded_groups.append(TimeGroup(parent=group.parent, value=mapped_value))
+        return TimeGroupedSet(tuple(bounded_groups))
     if isinstance(base, TimeRange):
-        return fn(_require_single_year_base(base, op_name))
+        source_member = _require_single_year_base(base, op_name)
+        return _bound_year_mapped_value(source_member, fn(source_member))
     members = _extract_year_members(base, op_name)
-    return TimeGroupedSet(tuple(TimeGroup(parent=member, value=fn(member)) for member in members))
+    bounded_groups: list[TimeGroup] = []
+    for member in members:
+        mapped_value = _bound_year_mapped_value(member, fn(member))
+        if _has_temporal_members(mapped_value):
+            bounded_groups.append(TimeGroup(parent=member, value=mapped_value))
+    return TimeGroupedSet(tuple(bounded_groups))
 
 
 def _validate_subperiod_request(base: TimeRange, unit: str, count: int) -> str:
@@ -1375,7 +1427,9 @@ def eval_expr(
             )
             if version is None:
                 raise ValueError(
-                    f"Missing business calendar data for region={payload['region']}, schedule_year={schedule_year}"
+                    "Missing business calendar data for event query: "
+                    f"region={payload['region']}, schedule_year={schedule_year}, "
+                    f"event_key={payload['event_key']}, scope={payload['scope']}"
                 )
             span = business_calendar.get_event_span(
                 region=payload["region"],

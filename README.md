@@ -395,6 +395,9 @@ curl -X POST http://127.0.0.1:8000/query/pipeline \
 - `enumerate_subperiods`、`select_subperiod`、`slice_subperiods` 在 same-grain 成员上支持 identity/no-op 语义。例如“最近10个工作日每天收益分别是多少”会直接保留这 10 个日成员，不再报 `day -> day` 不支持。
 - `rewrite` 当前以 full-sentence LLM-2 为主路径；deterministic rewrite 只保留安全的时间格式化场景，不再因为结果里有多个 segment 或 grouped members 就自动补出“分别”“各自”。
 - `metadata.rewrite_hints` 会把 top-level source 的最小集合拓扑暴露给 rewrite；对非连续离散日集合，rewrite 会优先列出 leaf dates，避免被错误压成一个 covering range。
+- 如果原问题同时包含枚举型时间轴和独立业务轴，例如 `昨天每小时每个收费站...`、`本月至今每个工作日每个收费站...`，safe rewrite 会保留原时间骨架，并把绝对时间作为补充展开，例如 `昨天每小时（即...）每个收费站...`，不再把时间轴压成裸成员列表。
+- 对 `过去3年春节假期...` 这类 non-mapped multi-year holiday wording，parser / resolve / rewrite 会保留原骨架，不再静默改成 `过去3年每年春节假期...`；只有原问题显式写出 `每年 / 各年` 时，才保留 mapped-year wording。
+- 对 year-set 映射得到的 `select_month / select_quarter / select_half_year`、`calendar_event_range`、`enumerate_makeup_workdays`，resolver 现在统一按 source member 做 `overlap + clip`：无交集的边界年会被省略，有交集的边界年会保留 clipped member，不再把 touched year 的完整自然区间静默带出窗口。
 - 本次 rewrite 路径不包含 replay guardrail、conservative fallback 或 anchored rewrite；如果后续引入，会作为单独变更处理。
 - 如果问题里完全没有时间信息，`POST /query/parse` 和 `POST /query/pipeline` 会默认补一个“昨天”的单日时间字段。
 - 这个默认“昨天”只影响 parser 驱动的链路；直接调用 `POST /query/rewrite` 且传入空 `resolved_time_expressions` 时，仍会直接返回原问题。

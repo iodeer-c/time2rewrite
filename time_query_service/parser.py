@@ -11,9 +11,13 @@ from time_query_service.schemas import ParsedTimeExpressions
 
 
 ABSOLUTE_YEAR_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?:度|全年)?\s*$")
+YEAR_LITERAL_IN_LIST_PATTERN = re.compile(r"(?P<year>\d{4})年(?:度|全年)?")
 ABSOLUTE_MONTH_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?P<month>\d{1,2})月(?:份)?\s*$")
 ABSOLUTE_QUARTER_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?:第)?(?P<quarter>[一二三四1234])季度\s*$")
 ABSOLUTE_HALF_YEAR_PATTERN = re.compile(r"^\s*(?P<year>\d{4})年(?P<half>[上下])半年\s*$")
+MULTI_ROOT_NATURAL_PERIOD_PATTERN = re.compile(
+    r"(?P<years>\d{4}年(?:度|全年)?(?:\s*(?:、|，|和)\s*\d{4}年(?:度|全年)?)+)\s*(?P<suffix>每个季度|每个月|每月|每个半年|每年)"
+)
 HOLIDAY_DAY_PATTERN = re.compile(
     r"^\s*(?:(?P<relative>去年|今年|明年)|(?P<year>\d{4})年)?(?P<holiday>元旦|春节|清明节|清明|劳动节|端午节|端午|中秋节|中秋|国庆节|国庆)(?:当天|当日|正日)\s*$"
 )
@@ -536,6 +540,9 @@ week 作为子周期时，统一使用下面的编号规则：
 - 如果问题是显式起止区间下的“各月分别 / 每周分别 / 各季度分别 / 每天分别 / 各年分别”，也优先输出 enumerate_subperiods，但其 base 必须是 bounded_range
 - “过去3年每年第一季度 / 近5年每年3月” 这类 year 集合上的映射选择，必须先得到 year 集合，再对该集合使用 select_quarter / select_month
 - “过去3年每年春节假期 / 近5年每年国庆补班日” 这类 year 集合上的节假日映射，必须使用 schedule_year_expr
+- 如果某个 calendar_event_range / enumerate_makeup_workdays 使用 schedule_year_expr，则它引用的目标必须能求值成 year-valued set；对“过去3年…假期”这类多年份表达，不要把裸 rolling(year, N) 直接作为 schedule_year_expr 的引用目标
+- “过去3年春节假期 / 最近5年国庆假期” 这类只给出多年份跨度加节假日名称、但没有显式 `每年` / `各年` 的表达，不得静默注入 `每年`
+- 对这类 non-mapped multi-year holiday query，text 必须保留原问题中的时间骨架，例如 `过去3年春节假期`，不要改写成 `过去3年每年春节假期`
 - 对于拆分后的每个子时间窗口，优先使用 select_subperiod；不要把“第二周”错误表示成“前两周”
 - “X的第N个Y / X第一周 / X第二周 / X第一个月 / X第一个季度”这类表达，必须使用 select_subperiod，除非已有更直接且完全等价的专用选择 op
 - “完整月份 / 完整季度 / 完整周” 这类显式要求忽略首尾 partial 子周期的表达，必须在 enumerate_subperiods / select_subperiod / slice_subperiods 上设置 complete_only=true
@@ -1495,6 +1502,42 @@ week 作为子周期时，统一使用下面的编号规则：
   ]
 }
 
+标准输出样例36：
+问题：过去3年春节假期每个收费站的收益分别是多少
+输出：
+{
+  "time_expressions": [
+    {
+      "id": "t1",
+      "text": "过去3年",
+      "expr": {
+        "op": "enumerate_subperiods",
+        "unit": "year",
+        "base": {
+          "op": "rolling",
+          "unit": "year",
+          "value": 3,
+          "anchor": "system_date"
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "text": "过去3年春节假期",
+      "expr": {
+        "op": "calendar_event_range",
+        "region": "CN",
+        "event_key": "spring_festival",
+        "schedule_year_expr": {
+          "op": "reference",
+          "ref": "t1"
+        },
+        "scope": "consecutive_rest"
+      }
+    }
+  ]
+}
+
 依赖表达示例：
 {
   "time_expressions": [
@@ -1679,8 +1722,11 @@ class QueryParser:
         parsed = self._normalize_no_time_parse(ParsedTimeExpressions.model_validate(payload))
         parsed = self._normalize_legacy_rolling_expressions(parsed)
         parsed = self._normalize_literal_period_expressions(parsed)
+        parsed = self._normalize_multi_root_natural_period_expressions(parsed, query)
         parsed = self._normalize_continuous_range_slice_segments(parsed)
         parsed = self._normalize_business_calendar_semantics(parsed, query, system_date, system_datetime)
+        parsed = self._normalize_schedule_year_expr_year_helpers(parsed)
+        parsed = self._normalize_multi_year_holiday_wording(parsed, query)
         parsed = self._normalize_irrelevant_rolling_flag(parsed)
         if self._parsed_contains_current_hour(parsed) and system_datetime is None:
             raise ValueError("current_hour requires system_datetime.")
@@ -1757,6 +1803,106 @@ class QueryParser:
         normalized["time_expressions"] = expressions
         normalized["rolling_includes_today"] = False
         return normalized
+
+    @staticmethod
+    def _query_mapped_multi_year_holiday_marker(query: str) -> str | None:
+        if "假期" not in query:
+            return None
+        if "各年" in query:
+            return "各年"
+        if "每年" in query:
+            return "每年"
+        return None
+
+    @staticmethod
+    def _query_uses_non_mapped_multi_year_holiday_wording(query: str) -> bool:
+        if "假期" not in query:
+            return False
+        if "每年" in query or "各年" in query:
+            return False
+        return bool(re.search(r"(?:过去|最近|近)\s*[一二两三四五六七八九十\d]+\s*年[^\n，。！？,!?；;]*假期", query))
+
+    @classmethod
+    def _strip_mapped_year_wording(cls, text: str) -> str:
+        updated = re.sub(r"(每年|各年)", "", text, count=1)
+        return re.sub(r"\s+", "", updated)
+
+    @classmethod
+    def _insert_mapped_year_wording(cls, text: str, marker: str) -> str:
+        normalized = re.sub(r"\s+", "", text)
+        if marker in normalized:
+            return normalized
+        match = re.search(r"((?:过去|最近|近)[一二两三四五六七八九十\d]+年)", normalized)
+        if match is None:
+            return normalized
+        return f"{normalized[:match.end()]}{marker}{normalized[match.end():]}"
+
+    @classmethod
+    def _normalize_schedule_year_expr_year_helpers(
+        cls,
+        parsed: ParsedTimeExpressions,
+    ) -> ParsedTimeExpressions:
+        payload = parsed.model_dump(mode="python")
+        items_by_id = {item["id"]: item for item in payload["time_expressions"]}
+        changed = False
+
+        for item in payload["time_expressions"]:
+            expr = item["expr"]
+            if expr["op"] not in {"calendar_event_range", "enumerate_makeup_workdays"}:
+                continue
+            schedule_year_expr = expr.get("schedule_year_expr")
+            if not isinstance(schedule_year_expr, Mapping) or schedule_year_expr.get("op") != "reference":
+                continue
+            referenced = items_by_id.get(schedule_year_expr.get("ref"))
+            if referenced is None:
+                continue
+            referenced_expr = referenced["expr"]
+            if referenced_expr.get("op") == "rolling" and referenced_expr.get("unit") == "year":
+                referenced["expr"] = {
+                    "op": "enumerate_subperiods",
+                    "unit": "year",
+                    "base": referenced_expr,
+                }
+                changed = True
+
+        return ParsedTimeExpressions.model_validate(payload) if changed else parsed
+
+    @classmethod
+    def _normalize_multi_year_holiday_wording(
+        cls,
+        parsed: ParsedTimeExpressions,
+        query: str,
+    ) -> ParsedTimeExpressions:
+        mapped_marker = cls._query_mapped_multi_year_holiday_marker(query)
+        non_mapped_query = cls._query_uses_non_mapped_multi_year_holiday_wording(query)
+        if mapped_marker is None and not non_mapped_query:
+            return parsed
+
+        payload = parsed.model_dump(mode="python")
+        changed = False
+        for item in payload["time_expressions"]:
+            expr = item["expr"]
+            if expr["op"] == "enumerate_subperiods" and expr.get("unit") == "year":
+                updated_text = item["text"]
+                if mapped_marker is not None:
+                    updated_text = cls._insert_mapped_year_wording(updated_text, mapped_marker)
+                elif any(marker in updated_text for marker in ("每年", "各年")):
+                    updated_text = cls._strip_mapped_year_wording(updated_text)
+                if updated_text != item["text"]:
+                    item["text"] = updated_text
+                    changed = True
+                continue
+            if expr["op"] == "calendar_event_range" and expr.get("schedule_year_expr") is not None:
+                updated_text = item["text"]
+                if mapped_marker is not None:
+                    updated_text = cls._insert_mapped_year_wording(updated_text, mapped_marker)
+                elif any(marker in updated_text for marker in ("每年", "各年")):
+                    updated_text = cls._strip_mapped_year_wording(updated_text)
+                if updated_text != item["text"]:
+                    item["text"] = updated_text
+                    changed = True
+
+        return ParsedTimeExpressions.model_validate(payload) if changed else parsed
 
     @staticmethod
     def _extract_rolling_hours_value(query: str) -> int | None:
@@ -1909,6 +2055,74 @@ class QueryParser:
                 "year": int(year_match.group("year")),
             }
         return None
+
+    @classmethod
+    def _normalize_multi_root_natural_period_expressions(
+        cls,
+        parsed: ParsedTimeExpressions,
+        query: str,
+    ) -> ParsedTimeExpressions:
+        match = MULTI_ROOT_NATURAL_PERIOD_PATTERN.search(query)
+        if match is None:
+            return parsed
+
+        years = [int(year_match.group("year")) for year_match in YEAR_LITERAL_IN_LIST_PATTERN.finditer(match.group("years"))]
+        if len(years) < 2:
+            return parsed
+
+        suffix = match.group("suffix")
+        payload = parsed.model_dump(mode="python")
+        allowed_texts = {f"{year}年" for year in years}
+        allowed_texts.update({f"{year}年{suffix}" for year in years})
+        if any(item["text"] not in allowed_texts for item in payload["time_expressions"]):
+            return parsed
+
+        payload["time_expressions"] = cls._build_multi_root_natural_period_time_expressions(years, suffix)
+        return ParsedTimeExpressions.model_validate(payload)
+
+    @staticmethod
+    def _build_multi_root_natural_period_time_expressions(years: list[int], suffix: str) -> list[dict[str, Any]]:
+        time_expressions: list[dict[str, Any]] = []
+        if suffix == "每年":
+            for index, year in enumerate(years, start=1):
+                time_expressions.append(
+                    {
+                        "id": f"t{index}",
+                        "text": f"{year}年",
+                        "expr": {
+                            "op": "literal_period",
+                            "unit": "year",
+                            "year": year,
+                        },
+                    }
+                )
+            return time_expressions
+
+        unit_by_suffix = {
+            "每个月": "month",
+            "每月": "month",
+            "每个季度": "quarter",
+            "每个半年": "half_year",
+        }
+        unit = unit_by_suffix[suffix]
+        for index, year in enumerate(years, start=1):
+            time_expressions.append(
+                {
+                    "id": f"t{index}",
+                    "text": f"{year}年{suffix}",
+                    "expr": {
+                        "op": "enumerate_subperiods",
+                        "unit": unit,
+                        "complete_only": False,
+                        "base": {
+                            "op": "literal_period",
+                            "unit": "year",
+                            "year": year,
+                        },
+                    },
+                }
+            )
+        return time_expressions
 
     @classmethod
     def _normalize_continuous_range_slice_segments(cls, parsed: ParsedTimeExpressions) -> ParsedTimeExpressions:
