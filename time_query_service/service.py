@@ -36,7 +36,12 @@ class QueryPipelineService:
     @property
     def rewriter(self) -> Any:
         if self._rewriter is None:
-            self._rewriter = QueryRewriter(llm=self._create_role_llm("rewriter"))
+            rewriter_runner = self._create_role_llm("rewriter")
+            self._rewriter = QueryRewriter(
+                text_runner=rewriter_runner,
+                fallback_text_runner=rewriter_runner,
+                anchor_runner=self._create_optional_role_llm("semantic-anchor", "semantic_anchor"),
+            )
         return self._rewriter
 
     def _get_llm_runtime_config(self) -> LLMRuntimeConfig:
@@ -50,6 +55,18 @@ class QueryPipelineService:
             return LLMFactory.create_llm(config)
         except Exception as exc:
             raise RuntimeError(f"Failed to create LLM for role={role}: {exc}") from exc
+
+    def _create_optional_role_llm(self, *roles: str) -> Any | None:
+        runtime_config = self._get_llm_runtime_config()
+        for role in roles:
+            config = runtime_config.roles.get(role)
+            if config is None:
+                continue
+            try:
+                return LLMFactory.create_llm(config)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to create LLM for role={role}: {exc}") from exc
+        return None
 
     def parse_query(
         self,

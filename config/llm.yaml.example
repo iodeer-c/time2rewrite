@@ -29,3 +29,17 @@ roles:
       stream_usage: true
       extra_body:
         enable_thinking: false
+  semantic-anchor:
+    model_type: openai
+    model_name: qwen-plus
+    api_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: SEMANTIC_ANCHOR_API_KEY
+    api_key: ""
+    proxy_url_env: SEMANTIC_ANCHOR_PROXY_URL
+    proxy_url: ""
+    verify_ssl: false
+    additional_params:
+      temperature: 0
+      stream_usage: true
+      extra_body:
+        enable_thinking: false

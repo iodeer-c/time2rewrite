@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import json
 import re
 from collections import OrderedDict
 from datetime import datetime
@@ -8,7 +9,14 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from time_query_service.schemas import ResolvedTimeExpressions
+from time_query_service.schemas import (
+    ExecutionSpec,
+    ExecutionSpecSlot,
+    ResolvedTimeExpressions,
+    RewriteRoutingResult,
+    RewriteRoutingState,
+    SemanticAnchor,
+)
 
 HOUR_ENUMERATION_MARKERS = ("每小时", "各小时", "逐小时")
 BREAKDOWN_MARKERS = ("分别", "各自", "依次", "逐项", "逐个")
@@ -205,6 +213,10 @@ MULTI_ROOT_HOLIDAY_PATTERN = re.compile(
 REWRITER_SYSTEM_PROMPT = """
 你是一个“时间问题改写器”。
 
+  你只在 fallback full rewrite 路径中被调用。
+  如果 code 已经能够用 execution_spec 处理 trivial single-slot、default-window insertion、
+  contiguous same-grain compression 或其他受限编辑场景，这些 case 不属于你的职责。
+
   你的唯一职责是：
   根据输入中已经由上游计算完成的时间解析结果，把 original_query 中的时间表达改写成用户可读、时间明
   确的绝对时间表达，并自然嵌回原问题。
@@ -241,6 +253,7 @@ REWRITER_SYSTEM_PROMPT = """
   5. 保持原问题的意图、结果形态和问法风格
   6. 输出自然、简洁、用户可读
   7. 你的职责是保持原问题语义不变，只把时间改写为绝对表达
+  8. 非时间主体不得删除/改写
 
   如果 resolved_time_expressions 为空，直接输出 original_query。
 
@@ -473,6 +486,37 @@ REWRITER_SYSTEM_PROMPT = """
   - 不要输出内部结构信息
 
   只输出改写后的最终问题。
+"""
+
+SEMANTIC_ANCHOR_SYSTEM_PROMPT = """
+你是一个时间改写语义锚点生成器。
+
+你只输出最小 JSON，用于帮助后续代码组装 execution_spec。
+你不能输出最终改写句子，不能输出 rendered_time，不能输出额外解释。
+
+输出字段只允许：
+- result_shape
+- slots[]
+- compare_group_id
+
+slots[] 只允许：
+- slot_id
+- source_text
+- role
+- preserve_original_time_scaffold
+- occurrence_index
+
+只输出 JSON，不要输出 markdown，不要输出解释。
+"""
+
+CONSTRAINED_REWRITER_SYSTEM_PROMPT = """
+你是一个受限的时间文本执行器。
+
+你只能基于 original_query 和 execution_spec 产出最终一行问句。
+你不能推断新的业务语义，不能自行决定结果形态，不能新增 execution_spec 中不存在的约束。
+你必须只按 execution_spec 执行指定槽位替换或补充，并保持非时间文本和问法风格。
+
+最终只输出一行纯文本，不要输出解释，不要输出 JSON，不要输出 markdown。
 """
 
 
@@ -1228,14 +1272,265 @@ def _rewrite_grouped_natural_period_aggregate(
     return rewritten
 
 
+def _normalize_output_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _infer_result_shape(original_query: str, source_texts: list[str]) -> str:
+    if any(marker in original_query for marker in ("是哪天", "是哪两天", "是几号")):
+        return "date_identification"
+    if any(marker in original_query for marker in ("相比", "差多少", "差异", "对比")):
+        return "compare"
+    if _has_aggregate_intent(original_query):
+        return "aggregate"
+    if _is_explicit_breakdown_query(original_query):
+        return "per_window"
+    if any("每" in source_text or "每天" in source_text for source_text in source_texts):
+        return "per_window"
+    return "single"
+
+
+def _is_full_natural_month(start: datetime, end: datetime) -> bool:
+    if not _is_full_day_dt(start, end):
+        return False
+    if start.year != end.year or start.month != end.month:
+        return False
+    return start.day == 1 and end.day == calendar.monthrange(start.year, start.month)[1]
+
+
+def _render_contiguous_day_text(source_text: str, members: list[Any]) -> str | None:
+    if not members:
+        return None
+    start = _parse_resolved_time(members[0].start_time)
+    end = _parse_resolved_time(members[-1].end_time)
+    if "每天" in source_text and _is_full_natural_month(start, end):
+        return f"{start.year}年{start.month}月每天"
+    range_text = _format_range(members[0].start_time, members[-1].end_time)
+    if "每天" in source_text:
+        return f"{range_text}每天"
+    return range_text
+
+
+def _build_direct_execution_spec(
+    *,
+    original_query: str,
+    resolved: ResolvedTimeExpressions,
+) -> ExecutionSpec | None:
+    if len(resolved.resolved_time_expressions) == 1:
+        item = resolved.resolved_time_expressions[0]
+        start = _parse_resolved_time(item.start_time)
+        end = _parse_resolved_time(item.end_time)
+        if item.source_id is None and item.text not in original_query and _is_full_day_dt(start, end):
+            rendered_day = _format_range(item.start_time, item.end_time)
+            if original_query.count("数据") == 1:
+                return ExecutionSpec(
+                    result_shape="single",
+                    slots=[
+                        ExecutionSpecSlot(
+                            slot_id=item.id,
+                            source_text="数据",
+                            role="default_window",
+                            render_mode="default_window_data",
+                            rendered_time=f"{rendered_day}的数据",
+                            edit_action="replace_source_span",
+                        )
+                    ],
+                )
+            if original_query.count("收益") == 1:
+                return ExecutionSpec(
+                    result_shape="single",
+                    slots=[
+                        ExecutionSpecSlot(
+                            slot_id=item.id,
+                            source_text="收益",
+                            role="default_window",
+                            render_mode="default_window_revenue",
+                            rendered_time=f"{rendered_day}的收益",
+                            edit_action="replace_source_span",
+                        )
+                    ],
+                )
+        is_safe_single_slot = (
+            item.source_id is None
+            and item.text in original_query
+            and "假期" not in item.text
+            and not any(marker in item.text for marker in ("当天", "当日", "正日", "第一天", "最后一天"))
+            and not any(marker in original_query for marker in ("是哪天", "是哪两天", "是几号"))
+            and _is_full_day_dt(start, end)
+        )
+        if is_safe_single_slot:
+            return ExecutionSpec(
+                result_shape=_infer_result_shape(original_query, [item.text]),
+                slots=[
+                    ExecutionSpecSlot(
+                        slot_id=item.id,
+                        source_text=item.text,
+                        role="filter_range",
+                        render_mode="single_absolute",
+                        rendered_time=_format_range(item.start_time, item.end_time),
+                        edit_action="replace_source_span",
+                    )
+                ],
+            )
+
+    if resolved.metadata is None or resolved.metadata.rewrite_hints is None or len(resolved.metadata.rewrite_hints) != 1:
+        return None
+
+    source_id, hint = next(iter(resolved.metadata.rewrite_hints.items()))
+    if hint.member_grain != "day" or not hint.is_contiguous:
+        return None
+
+    members = [item for item in resolved.resolved_time_expressions if item.source_id == source_id]
+    if not members:
+        return None
+    members.sort(key=lambda item: item.start_time)
+    source_text = members[0].source_text or members[0].text
+    if not source_text or source_text not in original_query:
+        return None
+
+    rendered_time = _render_contiguous_day_text(source_text, members)
+    if rendered_time is None:
+        return None
+
+    preserve_scaffold = _has_non_time_business_axis(original_query)
+    return ExecutionSpec(
+        result_shape=_infer_result_shape(original_query, [source_text]),
+        slots=[
+            ExecutionSpecSlot(
+                slot_id=source_id,
+                source_text=source_text,
+                role="enumeration_grain",
+                render_mode="compressed_contiguous_days",
+                rendered_time=rendered_time,
+                edit_action="preserve_and_supplement" if preserve_scaffold else "replace_source_span",
+                preserve_original_time_scaffold=preserve_scaffold,
+            )
+        ],
+    )
+
+
+def _build_semantic_anchor_user_prompt(original_query: str, resolved: ResolvedTimeExpressions) -> str:
+    lines = [f"original_query: {original_query}", "resolved_slots:"]
+    for item in resolved.resolved_time_expressions:
+        lines.append(
+            json.dumps(
+                {
+                    "id": item.id,
+                    "text": item.text,
+                    "source_id": item.source_id,
+                    "source_text": item.source_text,
+                    "start_time": item.start_time,
+                    "end_time": item.end_time,
+                },
+                ensure_ascii=False,
+            )
+        )
+    return "\n".join(lines)
+
+
+def _build_execution_spec_from_anchor(
+    *,
+    original_query: str,
+    resolved: ResolvedTimeExpressions,
+    anchor: SemanticAnchor,
+) -> ExecutionSpec | None:
+    items_by_id = {item.id: item for item in resolved.resolved_time_expressions}
+    slots: list[ExecutionSpecSlot] = []
+    for anchor_slot in anchor.slots:
+        item = items_by_id.get(anchor_slot.slot_id)
+        if item is None:
+            matches = [candidate for candidate in resolved.resolved_time_expressions if candidate.text == anchor_slot.source_text]
+            if len(matches) != 1:
+                return None
+            item = matches[0]
+        if anchor_slot.source_text not in original_query:
+            return None
+        slots.append(
+            ExecutionSpecSlot(
+                slot_id=item.id,
+                source_text=anchor_slot.source_text,
+                role=anchor_slot.role,
+                match_mode="nth_occurrence" if anchor_slot.occurrence_index else "exact_text",
+                occurrence_index=anchor_slot.occurrence_index,
+                render_mode="anchor_absolute",
+                rendered_time=_format_range(item.start_time, item.end_time),
+                edit_action="preserve_and_supplement" if anchor_slot.preserve_original_time_scaffold else "replace_source_span",
+                preserve_original_time_scaffold=anchor_slot.preserve_original_time_scaffold,
+            )
+        )
+    if not slots:
+        return None
+    return ExecutionSpec(result_shape=anchor.result_shape, slots=slots)
+
+
+def _find_occurrence_span(text: str, target: str, occurrence_index: int) -> tuple[int, int] | None:
+    start = -1
+    search_from = 0
+    for _ in range(occurrence_index):
+        start = text.find(target, search_from)
+        if start < 0:
+            return None
+        search_from = start + len(target)
+    return start, start + len(target)
+
+
+def _render_slot_replacement(slot: ExecutionSpecSlot) -> str:
+    if slot.edit_action == "preserve_and_supplement":
+        return f"{slot.source_text}（即{slot.rendered_time}）"
+    return slot.rendered_time
+
+
+def _apply_execution_spec(original_query: str, execution_spec: ExecutionSpec) -> str | None:
+    replacements: list[tuple[int, int, str]] = []
+    for slot in execution_spec.slots:
+        occurrence_index = slot.occurrence_index or 1
+        span = _find_occurrence_span(original_query, slot.source_text, occurrence_index)
+        if span is None:
+            return None
+        replacements.append((span[0], span[1], _render_slot_replacement(slot)))
+
+    rewritten = original_query
+    for start, end, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
+        rewritten = f"{rewritten[:start]}{replacement}{rewritten[end:]}"
+    return _normalize_output_text(rewritten)
+
+
+def _build_constrained_rewriter_user_prompt(original_query: str, execution_spec: ExecutionSpec) -> str:
+    return "\n".join(
+        [
+            f"original_query: {original_query}",
+            "execution_spec:",
+            json.dumps(execution_spec.model_dump(mode="python"), ensure_ascii=False, indent=2),
+        ]
+    )
+
+
+def _validate_execution_output(
+    *,
+    original_query: str,
+    execution_spec: ExecutionSpec,
+    candidate: str,
+) -> bool:
+    if not candidate or len([line for line in candidate.splitlines() if line.strip()]) != 1:
+        return False
+    expected = _apply_execution_spec(original_query, execution_spec)
+    if expected is None:
+        return False
+    return _normalize_output_text(candidate) == expected
+
+
 class QueryRewriter:
     def __init__(
         self,
         *,
         text_runner: Any | None = None,
+        fallback_text_runner: Any | None = None,
+        anchor_runner: Any | None = None,
         llm: Any | None = None,
     ) -> None:
         self._text_runner = text_runner
+        self._fallback_text_runner = fallback_text_runner
+        self._anchor_runner = anchor_runner
         self._llm = llm
 
     def _get_text_runner(self) -> Any:
@@ -1245,18 +1540,74 @@ class QueryRewriter:
             self._text_runner = self._llm
         return self._text_runner
 
-    def rewrite_query_with_llm(
+    def _get_fallback_text_runner(self) -> Any:
+        if self._fallback_text_runner is None:
+            self._fallback_text_runner = self._get_text_runner()
+        return self._fallback_text_runner
+
+    def _get_anchor_runner(self) -> Any | None:
+        return self._anchor_runner
+
+    def _invoke_semantic_anchor(
         self,
         *,
         original_query: str,
-        resolved_time_expressions: dict[str, Any] | ResolvedTimeExpressions,
-    ) -> str | None:
-        resolved = ResolvedTimeExpressions.model_validate(resolved_time_expressions)
-        if resolved.metadata is not None and resolved.metadata.no_match_results:
+        resolved: ResolvedTimeExpressions,
+    ) -> SemanticAnchor | None:
+        runner = self._get_anchor_runner()
+        if runner is None:
             return None
-        if not resolved.resolved_time_expressions:
-            return original_query
 
+        messages = [
+            SystemMessage(content=SEMANTIC_ANCHOR_SYSTEM_PROMPT),
+            HumanMessage(content=_build_semantic_anchor_user_prompt(original_query, resolved)),
+        ]
+        for _ in range(2):
+            result = runner.invoke(messages)
+            raw_text = self._coerce_text(result).strip()
+            try:
+                payload = json.loads(raw_text)
+            except json.JSONDecodeError:
+                continue
+            try:
+                return SemanticAnchor.model_validate(payload)
+            except Exception:
+                continue
+        return None
+
+    def _run_constrained_execution(
+        self,
+        *,
+        original_query: str,
+        execution_spec: ExecutionSpec,
+    ) -> RewriteRoutingResult:
+        messages = [
+            SystemMessage(content=CONSTRAINED_REWRITER_SYSTEM_PROMPT),
+            HumanMessage(content=_build_constrained_rewriter_user_prompt(original_query, execution_spec)),
+        ]
+        result = self._get_text_runner().invoke(messages)
+        candidate = self._coerce_text(result).strip()
+        if _validate_execution_output(
+            original_query=original_query,
+            execution_spec=execution_spec,
+            candidate=candidate,
+        ):
+            return RewriteRoutingResult(
+                state=RewriteRoutingState.CONSTRAINED_EXECUTION,
+                execution_spec=execution_spec,
+                rewritten_query=_normalize_output_text(candidate),
+            )
+        return RewriteRoutingResult(
+            state=RewriteRoutingState.FALLBACK_FULL_REWRITE,
+            execution_spec=execution_spec,
+        )
+
+    def _legacy_rewrite_query(
+        self,
+        *,
+        original_query: str,
+        resolved: ResolvedTimeExpressions,
+    ) -> str | None:
         enumerated_hour_rewrite = _rewrite_enumerated_hours(
             original_query=original_query,
             resolved=resolved,
@@ -1331,8 +1682,57 @@ class QueryRewriter:
             SystemMessage(content=REWRITER_SYSTEM_PROMPT),
             HumanMessage(content=build_rewriter_user_prompt(original_query, resolved)),
         ]
-        result = self._get_text_runner().invoke(messages)
+        result = self._get_fallback_text_runner().invoke(messages)
         return self._coerce_text(result).strip()
+
+    def rewrite_query_with_llm(
+        self,
+        *,
+        original_query: str,
+        resolved_time_expressions: dict[str, Any] | ResolvedTimeExpressions,
+    ) -> str | None:
+        resolved = ResolvedTimeExpressions.model_validate(resolved_time_expressions)
+        if resolved.metadata is not None and resolved.metadata.no_match_results:
+            return None
+        if not resolved.resolved_time_expressions:
+            return original_query
+        direct_execution_spec = _build_direct_execution_spec(
+            original_query=original_query,
+            resolved=resolved,
+        )
+        if direct_execution_spec is not None:
+            routing_result = self._run_constrained_execution(
+                original_query=original_query,
+                execution_spec=direct_execution_spec,
+            )
+            if routing_result.rewritten_query is not None:
+                return routing_result.rewritten_query
+
+        semantic_anchor = self._invoke_semantic_anchor(
+            original_query=original_query,
+            resolved=resolved,
+        )
+        if semantic_anchor is not None:
+            anchored_execution_spec = _build_execution_spec_from_anchor(
+                original_query=original_query,
+                resolved=resolved,
+                anchor=semantic_anchor,
+            )
+            if anchored_execution_spec is not None:
+                routing_result = self._run_constrained_execution(
+                    original_query=original_query,
+                    execution_spec=anchored_execution_spec,
+                )
+                if routing_result.rewritten_query is not None:
+                    return routing_result.rewritten_query
+
+        legacy_rewrite = self._legacy_rewrite_query(
+            original_query=original_query,
+            resolved=resolved,
+        )
+        if legacy_rewrite is not None:
+            return legacy_rewrite
+        return original_query
 
     @staticmethod
     def _coerce_text(result: Any) -> str:

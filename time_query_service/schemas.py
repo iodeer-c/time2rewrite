@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
@@ -475,6 +476,88 @@ class ResolvedTimeExpressions(StrictModel):
 
 
 ResolvedTimeExpressionGroup.model_rebuild()
+
+
+RewriteResultShape = Literal["single", "per_window", "aggregate", "compare", "date_identification"]
+RewriteSlotRole = Literal[
+    "filter_range",
+    "enumeration_grain",
+    "compare_left",
+    "compare_right",
+    "condition_modifier",
+    "date_target",
+    "default_window",
+]
+RewriteMatchMode = Literal["exact_text", "nth_occurrence"]
+RewriteEditAction = Literal["replace_source_span", "preserve_and_supplement"]
+
+
+class SemanticAnchorSlot(StrictModel):
+    slot_id: str
+    source_text: str
+    role: RewriteSlotRole
+    preserve_original_time_scaffold: bool = False
+    occurrence_index: int | None = Field(default=None, ge=1)
+
+
+class SemanticAnchor(StrictModel):
+    result_shape: RewriteResultShape
+    slots: list[SemanticAnchorSlot]
+    compare_group_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_slots(self) -> "SemanticAnchor":
+        if not self.slots:
+            raise ValueError("semantic anchor requires at least one slot")
+        return self
+
+
+class ExecutionSpecConstraints(StrictModel):
+    preserve_non_time_text: bool = True
+    preserve_question_style: bool = True
+    forbid_new_business_words: bool = True
+    forbid_change_result_shape: bool = True
+    forbid_drop_compare_binding: bool = True
+    allow_parenthetical_only_when_specified: bool = True
+    must_normalize_whitespace: bool = True
+
+
+class ExecutionSpecSlot(StrictModel):
+    slot_id: str
+    source_text: str
+    role: RewriteSlotRole
+    match_mode: RewriteMatchMode = "exact_text"
+    occurrence_index: int | None = Field(default=None, ge=1)
+    render_mode: str
+    rendered_time: str
+    edit_action: RewriteEditAction
+    preserve_original_time_scaffold: bool = False
+
+
+class ExecutionSpec(StrictModel):
+    result_shape: RewriteResultShape
+    slots: list[ExecutionSpecSlot]
+    constraints: ExecutionSpecConstraints = Field(default_factory=ExecutionSpecConstraints)
+
+    @model_validator(mode="after")
+    def validate_slots(self) -> "ExecutionSpec":
+        if not self.slots:
+            raise ValueError("execution spec requires at least one slot")
+        return self
+
+
+class RewriteRoutingState(str, Enum):
+    CONSTRAINED_EXECUTION = "constrained_execution"
+    FALLBACK_FULL_REWRITE = "fallback_full_rewrite"
+    REWRITE_ABSTAINED_NO_MATCH = "rewrite_abstained_no_match"
+    ORIGINAL_QUERY_FALLBACK = "original_query_fallback"
+
+
+class RewriteRoutingResult(StrictModel):
+    state: RewriteRoutingState
+    execution_spec: ExecutionSpec | None = None
+    semantic_anchor: SemanticAnchor | None = None
+    rewritten_query: str | None = None
 
 
 class TemporalContextRequest(StrictModel):
