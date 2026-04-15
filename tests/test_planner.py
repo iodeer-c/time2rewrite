@@ -1,6 +1,7 @@
 import json
+import re
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from time_query_service.contracts import ClarificationPlan
 from time_query_service.plan_validator import validate_plan
@@ -46,16 +47,17 @@ def test_validate_plan_rejects_missing_comparison_member_node():
     assert any("missing" in error for error in result.errors)
 
 
-def test_planner_system_prompt_contains_core_constraints():
+def test_planner_system_prompt_is_chinese_and_contains_core_constraints():
     assert "时间澄清规划器" in PLANNER_SYSTEM_PROMPT
     assert "只输出一个 JSON object" in PLANNER_SYSTEM_PROMPT
     assert "render_text" in PLANNER_SYSTEM_PROMPT
     assert "comparison_groups" in PLANNER_SYSTEM_PROMPT
     assert "reference_window" in PLANNER_SYSTEM_PROMPT
     assert "window_with_regular_grain" in PLANNER_SYSTEM_PROMPT
+    assert re.search(r"[\u4e00-\u9fff]{20,}", PLANNER_SYSTEM_PROMPT)
 
 
-def test_build_planner_messages_places_system_prompt_and_request_payload():
+def test_build_planner_messages_includes_few_shot_pairs_before_request_payload():
     messages = build_planner_messages(
         original_query="昨天杭千公司的收益是多少？",
         system_date="2026-04-15",
@@ -64,8 +66,19 @@ def test_build_planner_messages_places_system_prompt_and_request_payload():
     )
 
     assert isinstance(messages[0], SystemMessage)
-    assert len(messages) > 3
     assert isinstance(messages[-1], HumanMessage)
+
+    expected_message_count = 1 + (2 * len(PLANNER_FEW_SHOTS)) + 1
+    assert len(messages) == expected_message_count
+
+    for index, shot in enumerate(PLANNER_FEW_SHOTS):
+        human_message = messages[1 + (index * 2)]
+        ai_message = messages[2 + (index * 2)]
+        assert isinstance(human_message, HumanMessage)
+        assert isinstance(ai_message, AIMessage)
+
+        assert json.loads(human_message.content) == shot["input"]
+        assert json.loads(ai_message.content) == shot["output"]
 
     payload = json.loads(messages[-1].content)
     assert payload["original_query"] == "昨天杭千公司的收益是多少？"
