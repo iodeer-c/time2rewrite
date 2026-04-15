@@ -162,6 +162,35 @@ def test_resolve_previous_month_relative_window():
     assert result.items[0].display_exact_time == "2026年3月1日至2026年3月31日"
 
 
+def test_resolve_previous_quarter_relative_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "上季度",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "relative_window",
+                    "reason_code": "relative_time",
+                    "resolution_spec": {
+                        "relative_type": "single_relative",
+                        "unit": "quarter",
+                        "direction": "previous",
+                        "value": 1,
+                        "include_today": False,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年1月1日至2026年3月31日"
+
+
 def test_resolve_holiday_window_uses_business_calendar():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
 

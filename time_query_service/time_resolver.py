@@ -156,12 +156,23 @@ def _resolve_relative_window_intervals(
             target_year -= 1
         end_day = calendar.monthrange(target_year, target_month)[1]
         return [Interval(start_date=date(target_year, target_month, 1), end_date=date(target_year, target_month, end_day))]
+    if spec.relative_type == "single_relative" and spec.unit == "quarter" and spec.direction == "previous":
+        current_quarter = (anchor_date.month - 1) // 3 + 1
+        target_quarter = current_quarter - spec.value
+        target_year = anchor_date.year
+        while target_quarter <= 0:
+            target_quarter += 4
+            target_year -= 1
+        start_month = (target_quarter - 1) * 3 + 1
+        end_month = start_month + 2
+        end_day = calendar.monthrange(target_year, end_month)[1]
+        return [Interval(start_date=date(target_year, start_month, 1), end_date=date(target_year, end_month, end_day))]
     if spec.relative_type == "to_date" and spec.unit == "month" and spec.direction == "current":
         start_date = anchor_date.replace(day=1)
         end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
         return [Interval(start_date=start_date, end_date=end_date)]
     raise ValueError(
-        "Current resolver slice only supports previous single-day/week/month relative windows "
+        "Current resolver slice only supports previous single-day/week/month/quarter relative windows "
         "and current month-to-date windows."
     )
 
