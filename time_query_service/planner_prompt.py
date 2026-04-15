@@ -308,6 +308,34 @@ PLANNER_FEW_SHOTS: list[dict[str, Any]] = [
     },
     {
         "input": {
+            "original_query": "2025年3月杭千公司的收益是多少？",
+            "system_date": "2026-04-15",
+            "system_datetime": "2026-04-15 09:30:00",
+            "timezone": "Asia/Shanghai",
+        },
+        "output": {
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "2025年3月",
+                    "ordinal": 1,
+                    "surface_fragments": [],
+                    "needs_clarification": False,
+                    "node_kind": "explicit_window",
+                    "reason_code": "already_explicit_natural_period",
+                    "resolution_spec": {
+                        "window_type": "named_period",
+                        "calendar_unit": "month",
+                        "year_ref": {"mode": "absolute", "year": 2025},
+                        "month": 3,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+    },
+    {
+        "input": {
             "original_query": "2025年国庆假期收益是多少？",
             "system_date": "2026-04-15",
             "system_datetime": "2026-04-15 09:30:00",
@@ -326,7 +354,7 @@ PLANNER_FEW_SHOTS: list[dict[str, Any]] = [
                     "resolution_spec": {
                         "holiday_key": "national_day",
                         "year_ref": {"mode": "absolute", "year": 2025},
-                        "calendar_mode": "statutory",
+                        "calendar_mode": "configured",
                     },
                 }
             ],
@@ -424,7 +452,7 @@ PLANNER_FEW_SHOTS: list[dict[str, Any]] = [
                     "resolution_spec": {
                         "window_type": "named_period",
                         "calendar_unit": "month",
-                        "year_ref": {"mode": "absolute", "year": 2026},
+                        "year_ref": {"mode": "relative", "offset": 0},
                         "month": 3,
                     },
                 },
@@ -441,7 +469,7 @@ PLANNER_FEW_SHOTS: list[dict[str, Any]] = [
                         "alignment": "same_period",
                         "shift": {
                             "unit": "year",
-                            "value": 1,
+                            "value": -1,
                         },
                     },
                 },
