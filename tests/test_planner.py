@@ -58,6 +58,8 @@ def test_planner_system_prompt_is_chinese_and_contains_core_constraints():
 
 
 def test_build_planner_messages_includes_few_shot_pairs_before_request_payload():
+    assert PLANNER_FEW_SHOTS, "Expected at least one few-shot example."
+
     messages = build_planner_messages(
         original_query="昨天杭千公司的收益是多少？",
         system_date="2026-04-15",
@@ -83,6 +85,8 @@ def test_build_planner_messages_includes_few_shot_pairs_before_request_payload()
     payload = json.loads(messages[-1].content)
     assert payload["original_query"] == "昨天杭千公司的收益是多少？"
     assert payload["system_date"] == "2026-04-15"
+    assert payload["system_datetime"] == "2026-04-15 09:30:00"
+    assert payload["timezone"] == "Asia/Shanghai"
 
 
 def test_planner_few_shots_have_valid_clarification_plan_outputs():
