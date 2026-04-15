@@ -57,6 +57,13 @@ def test_planner_system_prompt_is_chinese_and_contains_core_constraints():
     assert re.search(r"[\u4e00-\u9fff]{20,}", PLANNER_SYSTEM_PROMPT)
 
 
+def test_planner_system_prompt_locks_key_chinese_guardrails():
+    assert "render_text：原句中实际出现、最终要被加注释的文本" in PLANNER_SYSTEM_PROMPT
+    assert "resolution_spec 必须是结构化对象" in PLANNER_SYSTEM_PROMPT
+    assert "只输出 JSON object" in PLANNER_SYSTEM_PROMPT
+    assert "不要输出代码块" in PLANNER_SYSTEM_PROMPT
+
+
 def test_build_planner_messages_includes_few_shot_pairs_before_request_payload():
     assert PLANNER_FEW_SHOTS, "Expected at least one few-shot example."
 
@@ -92,6 +99,23 @@ def test_build_planner_messages_includes_few_shot_pairs_before_request_payload()
 def test_planner_few_shots_have_valid_clarification_plan_outputs():
     for shot in PLANNER_FEW_SHOTS:
         ClarificationPlan.model_validate(shot["output"])
+
+
+def test_planner_few_shots_cover_expected_node_kinds():
+    node_kinds = {
+        node["node_kind"]
+        for shot in PLANNER_FEW_SHOTS
+        for node in shot["output"]["nodes"]
+    }
+
+    assert {
+        "relative_window",
+        "explicit_window",
+        "holiday_window",
+        "reference_window",
+        "window_with_regular_grain",
+        "window_with_calendar_selector",
+    }.issubset(node_kinds)
 
 
 def test_planner_retries_once_when_first_plan_is_invalid():
