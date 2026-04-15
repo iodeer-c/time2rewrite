@@ -457,6 +457,53 @@ def test_process_query_can_render_offset_window_annotation_without_llm_config():
     assert response["rewritten_query"] == "去年国庆假期后3天（2025年10月9日至2025年10月11日）的收益是多少？"
 
 
+def test_process_query_can_render_explicit_month_workday_annotation_without_llm_config():
+    calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "2026年4月每个工作日",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "window_with_calendar_selector",
+                        "reason_code": "holiday_or_business_calendar",
+                        "resolution_spec": {
+                            "window": {
+                                "kind": "explicit_window",
+                                "value": {
+                                    "window_type": "named_period",
+                                    "calendar_unit": "month",
+                                    "year_ref": {"mode": "absolute", "year": 2026},
+                                    "month": 4,
+                                },
+                            },
+                            "selector": {"selector_type": "workday"},
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+        business_calendar=calendar,
+    )
+
+    response = service.process_query(
+        query="2026年4月每个工作日的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["rewritten_query"] == (
+        "2026年4月每个工作日（2026年4月1日至2026年4月3日、"
+        "2026年4月7日至2026年4月10日、2026年4月13日至2026年4月17日、"
+        "2026年4月20日至2026年4月24日、2026年4月27日至2026年4月30日）的收益是多少？"
+    )
+
+
 def test_process_query_returns_null_when_holiday_calendar_data_is_missing():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
     service = QueryPipelineService(

@@ -212,3 +212,46 @@ def test_resolve_offset_window_after_holiday():
     )
 
     assert result.items[0].display_exact_time == "2025年10月9日至2025年10月11日"
+
+
+def test_resolve_calendar_selector_over_explicit_month_window():
+    calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
+
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "2026年4月每个工作日",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "window_with_calendar_selector",
+                    "reason_code": "holiday_or_business_calendar",
+                    "resolution_spec": {
+                        "window": {
+                            "kind": "explicit_window",
+                            "value": {
+                                "window_type": "named_period",
+                                "calendar_unit": "month",
+                                "year_ref": {"mode": "absolute", "year": 2026},
+                                "month": 4,
+                            },
+                        },
+                        "selector": {"selector_type": "workday"},
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        business_calendar=calendar,
+    )
+
+    assert result.items[0].display_exact_time == (
+        "2026年4月1日至2026年4月3日、"
+        "2026年4月7日至2026年4月10日、"
+        "2026年4月13日至2026年4月17日、"
+        "2026年4月20日至2026年4月24日、"
+        "2026年4月27日至2026年4月30日"
+    )

@@ -98,7 +98,17 @@ def _resolve_node_intervals(
         )
     elif node.node_kind == "window_with_calendar_selector":
         spec = WindowWithCalendarSelectorResolutionSpec.model_validate(node.resolution_spec)
-        start_date, end_date = _resolve_nested_window(spec.window, anchor_date=anchor_date)
+        base_intervals = _resolve_inline_window_intervals(
+            window=spec.window,
+            anchor_date=anchor_date,
+            business_calendar=business_calendar,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
+        )
+        if len(base_intervals) != 1:
+            raise ValueError("Current resolver slice only supports single-interval calendar selector windows.")
+        start_date = base_intervals[0].start_date
+        end_date = base_intervals[0].end_date
         matched_dates = _filter_calendar_dates(
             start_date=start_date,
             end_date=end_date,
@@ -291,19 +301,6 @@ def _resolve_anchor_date(
     if system_datetime:
         return datetime.fromisoformat(system_datetime).date()
     return datetime.now(ZoneInfo(timezone)).date()
-
-
-def _resolve_nested_window(window: NestedWindowSpec, *, anchor_date: date) -> tuple[date, date]:
-    if window.kind != "relative_window":
-        raise ValueError(f"Unsupported nested window kind for current resolver slice: {window.kind}")
-
-    spec = RelativeWindowResolutionSpec.model_validate(window.value)
-    if spec.relative_type != "to_date" or spec.unit != "month" or spec.direction != "current":
-        raise ValueError("Current resolver slice only supports current month-to-date windows.")
-
-    start_date = anchor_date.replace(day=1)
-    end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
-    return start_date, end_date
 
 
 def _resolve_inline_window_intervals(
