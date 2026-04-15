@@ -1,13 +1,8 @@
 from fastapi import FastAPI
 
-app = FastAPI()
+app = FastAPI(title="Time Query Service")
 
 
 @app.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-
-@app.get("/hello/{name}")
-async def say_hello(name: str):
-    return {"message": f"Hello {name}"}
+def root() -> dict[str, str]:
+    return {"message": "time-query-service"}
