@@ -249,6 +249,103 @@ def test_resolve_current_quarter_to_date_relative_window():
     assert result.items[0].display_exact_time == "2026年4月1日至2026年4月15日"
 
 
+def test_resolve_current_year_to_date_relative_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "本年至今",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "relative_window",
+                    "reason_code": "rolling_or_to_date",
+                    "resolution_spec": {
+                        "relative_type": "to_date",
+                        "unit": "year",
+                        "direction": "current",
+                        "value": 1,
+                        "include_today": True,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年1月1日至2026年4月15日"
+
+
+def test_resolve_plan_skips_non_clarification_regular_grain_nodes():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "2025年每天",
+                    "ordinal": 1,
+                    "needs_clarification": False,
+                    "node_kind": "window_with_regular_grain",
+                    "reason_code": "already_explicit_natural_period",
+                    "resolution_spec": {
+                        "window": {
+                            "kind": "explicit_window",
+                            "value": {
+                                "window_type": "named_period",
+                                "calendar_unit": "year",
+                                "year_ref": {"mode": "absolute", "year": 2025},
+                            },
+                        },
+                        "grain": "day",
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items == []
+
+
+def test_resolve_regular_grain_window_uses_underlying_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "本月至今每天",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "window_with_regular_grain",
+                    "reason_code": "rolling_or_to_date",
+                    "resolution_spec": {
+                        "window": {
+                            "kind": "relative_window",
+                            "value": {
+                                "relative_type": "to_date",
+                                "unit": "month",
+                                "direction": "current",
+                                "value": 1,
+                                "include_today": True,
+                            },
+                        },
+                        "grain": "day",
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年4月1日至2026年4月15日"
+
+
 def test_resolve_holiday_window_uses_business_calendar():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
 

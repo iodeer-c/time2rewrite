@@ -22,6 +22,7 @@ from time_query_service.contracts import (
     RelativeWindowResolutionSpec,
     StrictModel,
     YearRef,
+    WindowWithRegularGrainResolutionSpec,
     WindowWithCalendarSelectorResolutionSpec,
 )
 
@@ -45,6 +46,8 @@ def resolve_plan(
 
     items: list[ClarificationItem] = []
     for node in normalized_plan.nodes:
+        if not node.needs_clarification:
+            continue
         intervals = _resolve_node_intervals(
             node=node,
             anchor_date=anchor_date,
@@ -52,8 +55,6 @@ def resolve_plan(
             node_lookup=node_lookup,
             resolved_by_node_id=resolved_by_node_id,
         )
-        if not node.needs_clarification:
-            continue
         items.append(_build_clarification_item(node=node, intervals=intervals))
     return ResolutionResult(items=items)
 
@@ -95,6 +96,15 @@ def _resolve_node_intervals(
             node_lookup=node_lookup,
             resolved_by_node_id=resolved_by_node_id,
             business_calendar=business_calendar,
+        )
+    elif node.node_kind == "window_with_regular_grain":
+        spec = WindowWithRegularGrainResolutionSpec.model_validate(node.resolution_spec)
+        intervals = _resolve_inline_window_intervals(
+            window=spec.window,
+            anchor_date=anchor_date,
+            business_calendar=business_calendar,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
         )
     elif node.node_kind == "window_with_calendar_selector":
         spec = WindowWithCalendarSelectorResolutionSpec.model_validate(node.resolution_spec)
@@ -179,9 +189,13 @@ def _resolve_relative_window_intervals(
         start_date = date(anchor_date.year, start_month, 1)
         end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
         return [Interval(start_date=start_date, end_date=end_date)]
+    if spec.relative_type == "to_date" and spec.unit == "year" and spec.direction == "current":
+        start_date = date(anchor_date.year, 1, 1)
+        end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
+        return [Interval(start_date=start_date, end_date=end_date)]
     raise ValueError(
         "Current resolver slice only supports previous single-day/week/month/quarter/year relative windows "
-        "and current month/quarter-to-date windows."
+        "and current month/quarter/year-to-date windows."
     )
 
 

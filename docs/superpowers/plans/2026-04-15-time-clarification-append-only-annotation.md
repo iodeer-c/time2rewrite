@@ -98,7 +98,7 @@ python3 -m venv .venv
 - Create: `tests/test_main.py`
 - Modify: `main.py`
 
-- [ ] **Step 1: Write the failing bootstrap test**
+- [x] **Step 1: Write the failing bootstrap test**
 
 ```python
 from fastapi.testclient import TestClient
@@ -111,13 +111,13 @@ def test_root_returns_service_banner():
     assert client.get("/").json() == {"message": "time-query-service"}
 ```
 
-- [ ] **Step 2: Run the bootstrap test and verify it fails**
+- [x] **Step 2: Run the bootstrap test and verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py::test_root_returns_service_banner -q`
 
 Expected: FAIL because `main.py` still returns the scaffold `"Hello World"` payload.
 
-- [ ] **Step 3: Add the minimal bootstrap implementation**
+- [x] **Step 3: Add the minimal bootstrap implementation**
 
 ```python
 app = FastAPI(title="Time Query Service")
@@ -134,13 +134,13 @@ Also:
 - add `requirements-dev.txt` with `pytest>=8,<9`
 - add `tests/__init__.py`
 
-- [ ] **Step 4: Run the bootstrap test again**
+- [x] **Step 4: Run the bootstrap test again**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py::test_root_returns_service_banner -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main.py requirements.txt requirements-dev.txt docs/superpowers/specs/2026-04-15-time-clarification-append-only-design.md tests/__init__.py tests/test_main.py
@@ -158,7 +158,7 @@ git commit -m "chore: bootstrap append-only annotation branch"
 - Create: `config/llm.yaml.example`
 - Create: `tests/test_llm.py`
 
-- [ ] **Step 1: Write the failing LLM config test**
+- [x] **Step 1: Write the failing LLM config test**
 
 ```python
 from pathlib import Path
@@ -179,13 +179,13 @@ def test_load_llm_runtime_config_reads_role_map(tmp_path: Path):
     assert runtime_config.roles["planner"].model_name == "gpt-test"
 ```
 
-- [ ] **Step 2: Run the LLM config test and verify it fails**
+- [x] **Step 2: Run the LLM config test and verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_llm.py::test_load_llm_runtime_config_reads_role_map -q`
 
 Expected: FAIL because the `time_query_service.llm` package does not exist yet.
 
-- [ ] **Step 3: Port the minimal LLM runtime modules**
+- [x] **Step 3: Port the minimal LLM runtime modules**
 
 ```python
 class LLMRuntimeConfig(BaseModel):
@@ -199,13 +199,13 @@ def load_llm_runtime_config(config_path: Path | None = None) -> LLMRuntimeConfig
 
 Port and adapt the donor modules so the new branch supports role-scoped `planner` and `annotator` runners without carrying old `parser/rewriter/semantic-anchor` naming assumptions.
 
-- [ ] **Step 4: Run the LLM tests**
+- [x] **Step 4: Run the LLM tests**
 
 Run: `.venv/bin/python -m pytest tests/test_llm.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add time_query_service/llm time_query_service/config.py config/llm.yaml.example tests/test_llm.py
@@ -223,7 +223,7 @@ git commit -m "feat: port llm runtime infrastructure"
 - Create: `time_query_service/business_calendar.py`
 - Create: `tests/test_business_calendar.py`
 
-- [ ] **Step 1: Write the failing business calendar load test**
+- [x] **Step 1: Write the failing business calendar load test**
 
 ```python
 from pathlib import Path
@@ -236,13 +236,13 @@ def test_calendar_loads_cn_fixture_root():
     assert calendar.has_year("CN", 2026) is True
 ```
 
-- [ ] **Step 2: Run the business calendar test and verify it fails**
+- [x] **Step 2: Run the business calendar test and verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_business_calendar.py::test_calendar_loads_cn_fixture_root -q`
 
 Expected: FAIL because neither the fixtures nor the loader exist yet.
 
-- [ ] **Step 3: Port the loader and calendar data**
+- [x] **Step 3: Port the loader and calendar data**
 
 ```python
 class JsonBusinessCalendar:
@@ -253,13 +253,13 @@ class JsonBusinessCalendar:
 
 Port the donor JSON fixtures and the reusable calendar loader / query helpers. Keep the business calendar API small and deterministic so later tasks can resolve `holiday`, `workday`, `trading_day`, and `business_day` selectors against exact dates.
 
-- [ ] **Step 4: Run the business calendar tests**
+- [x] **Step 4: Run the business calendar tests**
 
 Run: `.venv/bin/python -m pytest tests/test_business_calendar.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add config/business_calendar/CN time_query_service/business_calendar.py tests/test_business_calendar.py
@@ -272,7 +272,7 @@ git commit -m "feat: port business calendar assets"
 - Create: `time_query_service/contracts.py`
 - Create: `tests/test_contracts.py`
 
-- [ ] **Step 1: Write the failing contract validation tests**
+- [x] **Step 1: Write the failing contract validation tests**
 
 ```python
 import pytest
@@ -305,13 +305,13 @@ def test_contract_accepts_reference_window_node():
     assert plan.nodes[0].node_kind == "reference_window"
 ```
 
-- [ ] **Step 2: Run the contract tests and verify they fail**
+- [x] **Step 2: Run the contract tests and verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_contracts.py -q`
 
 Expected: FAIL because `ClarificationPlan` and the discriminated union models do not exist yet.
 
-- [ ] **Step 3: Implement the contracts**
+- [x] **Step 3: Implement the contracts**
 
 ```python
 class ClarificationPlan(BaseModel):
@@ -328,13 +328,13 @@ Add:
 - `ClarificationItem`
 - discriminated `resolution_spec` variants for all approved `node_kind` values
 
-- [ ] **Step 4: Run the contract tests**
+- [x] **Step 4: Run the contract tests**
 
 Run: `.venv/bin/python -m pytest tests/test_contracts.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add time_query_service/contracts.py tests/test_contracts.py
@@ -348,7 +348,7 @@ git commit -m "feat: add clarification plan contracts"
 - Create: `time_query_service/plan_validator.py`
 - Create: `tests/test_planner.py`
 
-- [ ] **Step 1: Write the failing planner/validator tests**
+- [x] **Step 1: Write the failing planner/validator tests**
 
 ```python
 from time_query_service.plan_validator import validate_plan
@@ -372,13 +372,13 @@ def test_validate_plan_rejects_missing_comparison_member_node():
     assert validate_plan(plan).is_valid is False
 ```
 
-- [ ] **Step 2: Run the planner/validator tests and verify they fail**
+- [x] **Step 2: Run the planner/validator tests and verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_planner.py -q`
 
 Expected: FAIL because neither the validator nor the planner wrapper exist yet.
 
-- [ ] **Step 3: Implement the planner and structural validator**
+- [x] **Step 3: Implement the planner and structural validator**
 
 ```python
 class ClarificationPlanner:
@@ -391,13 +391,13 @@ Add:
 - `validate_plan(...)` returning a typed validation result
 - one retry hook for structurally invalid plans
 
-- [ ] **Step 4: Run planner/validator tests**
+- [x] **Step 4: Run planner/validator tests**
 
 Run: `.venv/bin/python -m pytest tests/test_planner.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add time_query_service/planner.py time_query_service/plan_validator.py tests/test_planner.py
@@ -410,7 +410,7 @@ git commit -m "feat: add clarification planner and validation"
 - Create: `time_query_service/time_resolver.py`
 - Create: `tests/test_time_resolver.py`
 
-- [ ] **Step 1: Write the failing resolution tests**
+- [x] **Step 1: Write the failing resolution tests**
 
 ```python
 from time_query_service.time_resolver import resolve_plan
@@ -449,13 +449,13 @@ def test_resolve_workday_selector_returns_compressed_intervals():
     assert result.items[0].display_exact_time.startswith("2026年4月1日")
 ```
 
-- [ ] **Step 2: Run the resolution tests and verify they fail**
+- [x] **Step 2: Run the resolution tests and verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_time_resolver.py -q`
 
 Expected: FAIL because `resolve_plan` and interval rendering do not exist yet.
 
-- [ ] **Step 3: Implement the deterministic resolver**
+- [x] **Step 3: Implement the deterministic resolver**
 
 ```python
 def resolve_plan(*, plan: ClarificationPlan, system_date: str | None, system_datetime: str | None, timezone: str, business_calendar: BusinessCalendarPort | None) -> ResolutionResult:
@@ -474,13 +474,13 @@ Use donor resolve helpers where they are still correct, but drive them from `res
 
 Render exact time strings from ordered non-overlapping interval sets. Fail fast on missing calendar coverage for `calendar_sensitive` selectors.
 
-- [ ] **Step 4: Run the resolution tests**
+- [x] **Step 4: Run the resolution tests**
 
 Run: `.venv/bin/python -m pytest tests/test_time_resolver.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add time_query_service/time_resolver.py tests/test_time_resolver.py
@@ -493,7 +493,7 @@ git commit -m "feat: implement clarification plan resolution"
 - Create: `time_query_service/annotation.py`
 - Create: `tests/test_annotation.py`
 
-- [ ] **Step 1: Write the failing annotation tests**
+- [x] **Step 1: Write the failing annotation tests**
 
 ```python
 from time_query_service.annotation import annotate_query
@@ -516,13 +516,13 @@ def test_annotate_query_keeps_non_time_text_unchanged():
     assert rewritten == "昨天（2026年4月14日）杭千公司的收益是多少？"
 ```
 
-- [ ] **Step 2: Run the annotation tests and verify they fail**
+- [x] **Step 2: Run the annotation tests and verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_annotation.py -q`
 
 Expected: FAIL because the append-only renderer does not exist yet.
 
-- [ ] **Step 3: Implement the renderer**
+- [x] **Step 3: Implement the renderer**
 
 ```python
 class AppendOnlyAnnotationRenderer:
@@ -535,13 +535,13 @@ Add:
 - no-op short circuit when `clarification_items` is empty
 - lightweight output guard: non-empty, final-question shape, annotation trace present when items exist
 
-- [ ] **Step 4: Run the annotation tests**
+- [x] **Step 4: Run the annotation tests**
 
 Run: `.venv/bin/python -m pytest tests/test_annotation.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add time_query_service/annotation.py tests/test_annotation.py
@@ -555,7 +555,7 @@ git commit -m "feat: add append-only annotation renderer"
 - Modify: `main.py`
 - Create: `tests/test_service.py`
 
-- [ ] **Step 1: Write the failing service test**
+- [x] **Step 1: Write the failing service test**
 
 ```python
 from time_query_service.service import QueryPipelineService
@@ -578,13 +578,13 @@ def test_process_query_returns_original_query_when_no_clarification_needed():
     assert response["rewritten_query"] == "2025年杭千公司每天的收益是多少？"
 ```
 
-- [ ] **Step 2: Run the service test and verify it fails**
+- [x] **Step 2: Run the service test and verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_service.py::test_process_query_returns_original_query_when_no_clarification_needed -q`
 
 Expected: FAIL because the new pipeline service does not exist yet.
 
-- [ ] **Step 3: Implement the service orchestration**
+- [x] **Step 3: Implement the service orchestration**
 
 ```python
 class QueryPipelineService:
@@ -602,13 +602,13 @@ Wire:
 
 If useful for debugging parity, also expose `/query/plan`, `/query/resolve`, and `/query/rewrite`, but do not restore the old full-rewrite semantics.
 
-- [ ] **Step 4: Run the service tests**
+- [x] **Step 4: Run the service tests**
 
 Run: `.venv/bin/python -m pytest tests/test_service.py -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main.py time_query_service/service.py tests/test_service.py
@@ -622,7 +622,7 @@ git commit -m "feat: wire append-only pipeline service"
 - Modify: `tests/test_annotation.py`
 - Modify: `tests/test_service.py`
 
-- [ ] **Step 1: Add failing regression tests for approved scenarios**
+- [x] **Step 1: Add failing regression tests for approved scenarios**
 
 ```python
 def test_pipeline_returns_null_when_calendar_data_missing():
@@ -641,13 +641,13 @@ def test_pipeline_preserves_same_period_comparison_structure():
     ...
 ```
 
-- [ ] **Step 2: Run the regression suite and verify gaps**
+- [x] **Step 2: Run the regression suite and verify gaps**
 
 Run: `.venv/bin/python -m pytest tests/test_time_resolver.py tests/test_annotation.py tests/test_service.py -q`
 
 Expected: at least one FAIL exposing a missing edge case from the approved design.
 
-- [ ] **Step 3: Fill the smallest missing implementation gaps**
+- [x] **Step 3: Fill the smallest missing implementation gaps**
 
 ```python
 # Examples:
@@ -656,13 +656,13 @@ Expected: at least one FAIL exposing a missing edge case from the approved desig
 # - keep explicit window + regular grain as no-op
 ```
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/test_time_resolver.py tests/test_annotation.py tests/test_service.py time_query_service
@@ -671,12 +671,12 @@ git commit -m "test: lock append-only annotation regressions"
 
 ## Completion Checklist
 
-- [ ] Fresh branch contains the approved design doc
-- [ ] Donor assets are ported selectively, not wholesale
-- [ ] No old `rewriter.py` path or repair/validator stack is restored
-- [ ] `ClarificationPlan` is the sole planner-to-code contract
-- [ ] `comparison_groups` and `reference_window` are covered by tests
-- [ ] `calendar_sensitive` outputs render full compressed interval lists
-- [ ] Explicit window + regular grain no-op behavior is covered
-- [ ] Missing calendar coverage returns `null`
-- [ ] Full test suite passes in the worktree-local virtualenv
+- [x] Fresh branch contains the approved design doc
+- [x] Donor assets are ported selectively, not wholesale
+- [x] No old `rewriter.py` path or repair/validator stack is restored
+- [x] `ClarificationPlan` is the sole planner-to-code contract
+- [x] `comparison_groups` and `reference_window` are covered by tests
+- [x] `calendar_sensitive` outputs render full compressed interval lists
+- [x] Explicit window + regular grain no-op behavior is covered
+- [x] Missing calendar coverage returns `null`
+- [x] Full test suite passes in the worktree-local virtualenv
