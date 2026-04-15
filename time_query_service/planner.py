@@ -3,20 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from time_query_service.contracts import ClarificationPlan
 from time_query_service.plan_validator import validate_plan
-
-
-PLANNER_SYSTEM_PROMPT = """
-You are the Clarification Planner.
-
-Output JSON only. Do not answer the question. Do not explain.
-Generate a ClarificationPlan with:
-- nodes
-- comparison_groups
-""".strip()
+from time_query_service.planner_prompt import build_planner_messages
 
 
 class ClarificationPlanner:
@@ -63,10 +52,12 @@ class ClarificationPlanner:
             "timezone": timezone,
         }
         response = self._get_text_runner().invoke(
-            [
-                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=json.dumps(request_payload, ensure_ascii=False)),
-            ]
+            build_planner_messages(
+                original_query=request_payload["original_query"],
+                system_date=request_payload["system_date"],
+                system_datetime=request_payload["system_datetime"],
+                timezone=request_payload["timezone"],
+            )
         )
         raw_content = response.content if hasattr(response, "content") else response
         if not isinstance(raw_content, str):

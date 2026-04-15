@@ -130,3 +130,21 @@ def test_planner_retries_once_when_first_plan_is_invalid():
     assert plan.nodes == []
     assert plan.comparison_groups == []
     assert len(runner.calls) == 2
+
+
+def test_planner_sends_prompt_examples_before_retrying():
+    runner = FakeSequenceRunner(
+        [FakeResponse(json.dumps({"nodes": [], "comparison_groups": []}))]
+    )
+    planner = ClarificationPlanner(text_runner=runner)
+
+    planner.plan_query(
+        original_query="昨天杭千公司的收益是多少？",
+        system_date="2026-04-15",
+        system_datetime="2026-04-15 09:30:00",
+        timezone="Asia/Shanghai",
+    )
+
+    messages = runner.calls[0]
+    assert len(messages) > 3
+    assert "时间澄清规划器" in messages[0].content
