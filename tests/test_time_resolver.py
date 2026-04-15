@@ -104,6 +104,35 @@ def test_resolve_current_month_to_date_relative_window():
     assert result.items[0].display_exact_time == "2026年4月1日至2026年4月15日"
 
 
+def test_resolve_previous_week_relative_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "上周",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "relative_window",
+                    "reason_code": "relative_time",
+                    "resolution_spec": {
+                        "relative_type": "single_relative",
+                        "unit": "week",
+                        "direction": "previous",
+                        "value": 1,
+                        "include_today": False,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年4月6日至2026年4月12日"
+
+
 def test_resolve_holiday_window_uses_business_calendar():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
 
@@ -173,6 +202,102 @@ def test_resolve_reference_window_from_explicit_month():
     )
 
     assert result.items[0].display_exact_time == "2025年3月1日至2025年3月31日"
+
+
+def test_resolve_reference_window_from_explicit_quarter():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "今年第一季度",
+                    "ordinal": 1,
+                    "needs_clarification": False,
+                    "node_kind": "explicit_window",
+                    "reason_code": "already_explicit_natural_period",
+                    "resolution_spec": {
+                        "window_type": "named_period",
+                        "calendar_unit": "quarter",
+                        "year_ref": {"mode": "relative", "offset": 0},
+                        "quarter": 1,
+                    },
+                },
+                {
+                    "node_id": "n2",
+                    "render_text": "去年同期",
+                    "ordinal": 2,
+                    "needs_clarification": True,
+                    "node_kind": "reference_window",
+                    "reason_code": "same_period_reference",
+                    "resolution_spec": {
+                        "reference_node_id": "n1",
+                        "alignment": "same_period",
+                        "shift": {"unit": "year", "value": -1},
+                    },
+                },
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2025年1月1日至2025年3月31日"
+
+
+def test_resolve_explicit_single_date_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "2026年4月1日",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "explicit_window",
+                    "reason_code": "structural_enumeration",
+                    "resolution_spec": {
+                        "window_type": "single_date",
+                        "calendar_unit": "day",
+                        "start_date": "2026-04-01",
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年4月1日"
+
+
+def test_resolve_explicit_date_range_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "2026年4月1日到2026年4月3日",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "explicit_window",
+                    "reason_code": "structural_enumeration",
+                    "resolution_spec": {
+                        "window_type": "date_range",
+                        "calendar_unit": "day",
+                        "start_date": "2026-04-01",
+                        "end_date": "2026-04-03",
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年4月1日至2026年4月3日"
 
 
 def test_resolve_offset_window_after_holiday():

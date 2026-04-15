@@ -143,12 +143,17 @@ def _resolve_relative_window_intervals(
     if spec.relative_type == "single_relative" and spec.unit == "day" and spec.direction == "previous":
         target_date = anchor_date - timedelta(days=spec.value)
         return [Interval(start_date=target_date, end_date=target_date)]
+    if spec.relative_type == "single_relative" and spec.unit == "week" and spec.direction == "previous":
+        current_week_monday = anchor_date - timedelta(days=anchor_date.weekday())
+        start_date = current_week_monday - timedelta(weeks=spec.value)
+        end_date = start_date + timedelta(days=6)
+        return [Interval(start_date=start_date, end_date=end_date)]
     if spec.relative_type == "to_date" and spec.unit == "month" and spec.direction == "current":
         start_date = anchor_date.replace(day=1)
         end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
         return [Interval(start_date=start_date, end_date=end_date)]
     raise ValueError(
-        "Current resolver slice only supports previous single-day relative windows "
+        "Current resolver slice only supports previous single-day/week relative windows "
         "and current month-to-date windows."
     )
 
@@ -203,6 +208,20 @@ def _resolve_explicit_window_intervals(
             raise ValueError("month explicit_window requires month")
         month_last_day = calendar.monthrange(year, spec.month)[1]
         return [Interval(start_date=date(year, spec.month, 1), end_date=date(year, spec.month, month_last_day))]
+    if spec.calendar_unit == "quarter":
+        if spec.quarter is None:
+            raise ValueError("quarter explicit_window requires quarter")
+        start_month = (spec.quarter - 1) * 3 + 1
+        end_month = start_month + 2
+        end_day = calendar.monthrange(year, end_month)[1]
+        return [Interval(start_date=date(year, start_month, 1), end_date=date(year, end_month, end_day))]
+    if spec.calendar_unit == "half":
+        if spec.half is None:
+            raise ValueError("half explicit_window requires half")
+        start_month = 1 if spec.half == 1 else 7
+        end_month = 6 if spec.half == 1 else 12
+        end_day = calendar.monthrange(year, end_month)[1]
+        return [Interval(start_date=date(year, start_month, 1), end_date=date(year, end_month, end_day))]
     raise ValueError(f"Unsupported explicit calendar_unit for current resolver slice: {spec.calendar_unit}")
 
 

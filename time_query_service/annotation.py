@@ -105,32 +105,58 @@ def _locate_render_spans(
     search_start = 0
 
     for item in sorted(items, key=lambda value: value.ordinal):
-        index = _locate_item_index(
+        span = _locate_item_span(
             original_query=original_query,
             item=item,
             search_start=search_start,
         )
-        if index < 0:
+        if span is None:
             return None
-        span = (index, index + len(item.render_text), item)
-        spans.append(span)
+        spans.append((span[0], span[1], item))
         search_start = span[1]
 
     return spans
 
 
-def _locate_item_index(
+def _locate_item_span(
     *,
     original_query: str,
     item: ClarificationItem,
     search_start: int,
-) -> int:
+) -> tuple[int, int] | None:
     occurrences = _find_occurrences(original_query, item.render_text)
     if len(occurrences) > 1 and item.ordinal <= len(occurrences):
         candidate = occurrences[item.ordinal - 1]
         if candidate >= search_start:
-            return candidate
-    return original_query.find(item.render_text, search_start)
+            return (candidate, candidate + len(item.render_text))
+    direct_index = original_query.find(item.render_text, search_start)
+    if direct_index >= 0:
+        return (direct_index, direct_index + len(item.render_text))
+    if item.surface_fragments:
+        return _locate_surface_fragment_span(
+            original_query=original_query,
+            item=item,
+            search_start=search_start,
+        )
+    return None
+
+
+def _locate_surface_fragment_span(
+    *,
+    original_query: str,
+    item: ClarificationItem,
+    search_start: int,
+) -> tuple[int, int] | None:
+    current_search_start = search_start
+    first_fragment_span: tuple[int, int] | None = None
+    for fragment in item.surface_fragments:
+        fragment_index = original_query.find(fragment, current_search_start)
+        if fragment_index < 0:
+            return None
+        if first_fragment_span is None:
+            first_fragment_span = (fragment_index, fragment_index + len(fragment))
+        current_search_start = fragment_index + len(fragment)
+    return first_fragment_span
 
 
 def _find_occurrences(text: str, needle: str) -> list[int]:
