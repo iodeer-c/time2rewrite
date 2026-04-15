@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,10 +13,14 @@ from time_query_service.contracts import (
     ClarificationItem,
     ClarificationPlan,
     ClarificationNode,
+    ExplicitWindowResolutionSpec,
+    HolidayWindowResolutionSpec,
     Interval,
     NestedWindowSpec,
+    ReferenceWindowResolutionSpec,
     RelativeWindowResolutionSpec,
     StrictModel,
+    YearRef,
     WindowWithCalendarSelectorResolutionSpec,
 )
 
@@ -34,42 +39,72 @@ def resolve_plan(
 ) -> ResolutionResult:
     normalized_plan = plan if isinstance(plan, ClarificationPlan) else ClarificationPlan.model_validate(plan)
     anchor_date = _resolve_anchor_date(system_date=system_date, system_datetime=system_datetime, timezone=timezone)
+    node_lookup = {node.node_id: node for node in normalized_plan.nodes}
+    resolved_by_node_id: dict[str, list[Interval]] = {}
 
     items: list[ClarificationItem] = []
     for node in normalized_plan.nodes:
+        intervals = _resolve_node_intervals(
+            node=node,
+            anchor_date=anchor_date,
+            business_calendar=business_calendar,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
+        )
         if not node.needs_clarification:
             continue
-        items.append(
-            _resolve_node(
-                node=node,
-                anchor_date=anchor_date,
-                timezone=timezone,
-                business_calendar=business_calendar,
-            )
-        )
+        items.append(_build_clarification_item(node=node, intervals=intervals))
     return ResolutionResult(items=items)
 
 
-def _resolve_node(
+def _resolve_node_intervals(
     *,
     node: ClarificationNode,
     anchor_date: date,
-    timezone: str,
     business_calendar: BusinessCalendarPort | None,
-) -> ClarificationItem:
-    if node.node_kind != "window_with_calendar_selector":
+    node_lookup: dict[str, ClarificationNode],
+    resolved_by_node_id: dict[str, list[Interval]],
+) -> list[Interval]:
+    cached = resolved_by_node_id.get(node.node_id)
+    if cached is not None:
+        return cached
+
+    if node.node_kind == "relative_window":
+        intervals = _resolve_relative_window_intervals(node=node, anchor_date=anchor_date)
+    elif node.node_kind == "holiday_window":
+        intervals = _resolve_holiday_window_intervals(
+            node=node,
+            anchor_date=anchor_date,
+            business_calendar=business_calendar,
+        )
+    elif node.node_kind == "explicit_window":
+        intervals = _resolve_explicit_window_intervals(node=node, anchor_date=anchor_date)
+    elif node.node_kind == "reference_window":
+        intervals = _resolve_reference_window_intervals(
+            node=node,
+            anchor_date=anchor_date,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
+            business_calendar=business_calendar,
+        )
+    elif node.node_kind == "window_with_calendar_selector":
+        spec = WindowWithCalendarSelectorResolutionSpec.model_validate(node.resolution_spec)
+        start_date, end_date = _resolve_nested_window(spec.window, anchor_date=anchor_date)
+        matched_dates = _filter_calendar_dates(
+            start_date=start_date,
+            end_date=end_date,
+            selector=spec.selector,
+            business_calendar=business_calendar,
+        )
+        intervals = _compress_dates_to_intervals(matched_dates)
+    else:
         raise ValueError(f"Unsupported node_kind for current resolver slice: {node.node_kind}")
 
-    spec = WindowWithCalendarSelectorResolutionSpec.model_validate(node.resolution_spec)
-    start_date, end_date = _resolve_nested_window(spec.window, anchor_date=anchor_date)
-    matched_dates = _filter_calendar_dates(
-        start_date=start_date,
-        end_date=end_date,
-        selector=spec.selector,
-        business_calendar=business_calendar,
-    )
-    intervals = _compress_dates_to_intervals(matched_dates)
+    resolved_by_node_id[node.node_id] = intervals
+    return intervals
 
+
+def _build_clarification_item(*, node: ClarificationNode, intervals: list[Interval]) -> ClarificationItem:
     return ClarificationItem(
         node_id=node.node_id,
         render_text=node.render_text,
@@ -78,6 +113,93 @@ def _resolve_node(
         surface_fragments=node.surface_fragments,
         intervals=intervals,
     )
+
+
+def _resolve_relative_window_intervals(
+    *,
+    node: ClarificationNode,
+    anchor_date: date,
+) -> list[Interval]:
+    spec = RelativeWindowResolutionSpec.model_validate(node.resolution_spec)
+    if spec.relative_type != "single_relative" or spec.unit != "day" or spec.direction != "previous":
+        raise ValueError("Current resolver slice only supports previous single-day relative windows.")
+    target_date = anchor_date - timedelta(days=spec.value)
+    return [Interval(start_date=target_date, end_date=target_date)]
+
+
+def _resolve_holiday_window_intervals(
+    *,
+    node: ClarificationNode,
+    anchor_date: date,
+    business_calendar: BusinessCalendarPort | None,
+) -> list[Interval]:
+    if business_calendar is None:
+        raise ValueError("Business calendar is required for holiday_window resolution.")
+
+    spec = HolidayWindowResolutionSpec.model_validate(node.resolution_spec)
+    schedule_year = _resolve_year_ref(spec.year_ref, anchor_date=anchor_date)
+    scope = "statutory" if spec.calendar_mode == "statutory" else "consecutive_rest"
+    holiday_range = business_calendar.get_event_span(
+        region="CN",
+        event_key=spec.holiday_key,
+        schedule_year=schedule_year,
+        scope=scope,
+    )
+    if holiday_range is None:
+        raise ValueError(
+            f"Missing business calendar data for holiday={spec.holiday_key}, schedule_year={schedule_year}."
+        )
+    return [Interval(start_date=holiday_range[0], end_date=holiday_range[1])]
+
+
+def _resolve_explicit_window_intervals(
+    *,
+    node: ClarificationNode,
+    anchor_date: date,
+) -> list[Interval]:
+    spec = ExplicitWindowResolutionSpec.model_validate(node.resolution_spec)
+    if spec.window_type == "single_date":
+        if spec.start_date is None:
+            raise ValueError("single_date explicit_window requires start_date")
+        return [Interval(start_date=spec.start_date, end_date=spec.start_date)]
+    if spec.window_type == "date_range":
+        if spec.start_date is None or spec.end_date is None:
+            raise ValueError("date_range explicit_window requires start_date and end_date")
+        return [Interval(start_date=spec.start_date, end_date=spec.end_date)]
+    if spec.window_type != "named_period":
+        raise ValueError(f"Unsupported explicit window_type: {spec.window_type}")
+
+    year = _resolve_year_ref(spec.year_ref or YearRef(mode="absolute", year=anchor_date.year), anchor_date=anchor_date)
+    if spec.calendar_unit == "year":
+        return [Interval(start_date=date(year, 1, 1), end_date=date(year, 12, 31))]
+    if spec.calendar_unit == "month":
+        if spec.month is None:
+            raise ValueError("month explicit_window requires month")
+        month_last_day = calendar.monthrange(year, spec.month)[1]
+        return [Interval(start_date=date(year, spec.month, 1), end_date=date(year, spec.month, month_last_day))]
+    raise ValueError(f"Unsupported explicit calendar_unit for current resolver slice: {spec.calendar_unit}")
+
+
+def _resolve_reference_window_intervals(
+    *,
+    node: ClarificationNode,
+    anchor_date: date,
+    node_lookup: dict[str, ClarificationNode],
+    resolved_by_node_id: dict[str, list[Interval]],
+    business_calendar: BusinessCalendarPort | None,
+) -> list[Interval]:
+    spec = ReferenceWindowResolutionSpec.model_validate(node.resolution_spec)
+    reference_node = node_lookup.get(spec.reference_node_id)
+    if reference_node is None:
+        raise ValueError(f"Missing reference node: {spec.reference_node_id}")
+    reference_intervals = _resolve_node_intervals(
+        node=reference_node,
+        anchor_date=anchor_date,
+        business_calendar=business_calendar,
+        node_lookup=node_lookup,
+        resolved_by_node_id=resolved_by_node_id,
+    )
+    return [_shift_interval(interval, unit=spec.shift.unit, value=spec.shift.value) for interval in reference_intervals]
 
 
 def _resolve_anchor_date(
@@ -104,6 +226,14 @@ def _resolve_nested_window(window: NestedWindowSpec, *, anchor_date: date) -> tu
     start_date = anchor_date.replace(day=1)
     end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
     return start_date, end_date
+
+
+def _resolve_year_ref(year_ref: YearRef, *, anchor_date: date) -> int:
+    if year_ref.mode == "absolute":
+        assert year_ref.year is not None
+        return year_ref.year
+    assert year_ref.offset is not None
+    return anchor_date.year + year_ref.offset
 
 
 def _filter_calendar_dates(
@@ -152,6 +282,49 @@ def _compress_dates_to_intervals(dates: list[date]) -> list[Interval]:
 
     intervals.append(Interval(start_date=current_start, end_date=current_end))
     return intervals
+
+
+def _shift_interval(interval: Interval, *, unit: str, value: int) -> Interval:
+    if unit == "day":
+        return Interval(
+            start_date=interval.start_date + timedelta(days=value),
+            end_date=interval.end_date + timedelta(days=value),
+        )
+    if unit == "week":
+        return Interval(
+            start_date=interval.start_date + timedelta(weeks=value),
+            end_date=interval.end_date + timedelta(weeks=value),
+        )
+    if unit == "month":
+        return Interval(
+            start_date=_add_months(interval.start_date, value),
+            end_date=_add_months(interval.end_date, value),
+        )
+    if unit == "quarter":
+        return Interval(
+            start_date=_add_months(interval.start_date, value * 3),
+            end_date=_add_months(interval.end_date, value * 3),
+        )
+    if unit == "year":
+        return Interval(
+            start_date=_add_years(interval.start_date, value),
+            end_date=_add_years(interval.end_date, value),
+        )
+    raise ValueError(f"Unsupported shift unit: {unit}")
+
+
+def _add_months(value: date, months: int) -> date:
+    year = value.year + (value.month - 1 + months) // 12
+    month = (value.month - 1 + months) % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _add_years(value: date, years: int) -> date:
+    target_year = value.year + years
+    if value.month == 2 and value.day == 29 and not calendar.isleap(target_year):
+        return date(target_year, 2, 28)
+    return date(target_year, value.month, value.day)
 
 
 def _render_intervals(intervals: list[Interval]) -> str:
