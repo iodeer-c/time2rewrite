@@ -191,6 +191,64 @@ def test_resolve_previous_quarter_relative_window():
     assert result.items[0].display_exact_time == "2026年1月1日至2026年3月31日"
 
 
+def test_resolve_previous_year_relative_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "去年",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "relative_window",
+                    "reason_code": "relative_time",
+                    "resolution_spec": {
+                        "relative_type": "single_relative",
+                        "unit": "year",
+                        "direction": "previous",
+                        "value": 1,
+                        "include_today": False,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2025年1月1日至2025年12月31日"
+
+
+def test_resolve_current_quarter_to_date_relative_window():
+    result = resolve_plan(
+        plan={
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "render_text": "本季度至今",
+                    "ordinal": 1,
+                    "needs_clarification": True,
+                    "node_kind": "relative_window",
+                    "reason_code": "rolling_or_to_date",
+                    "resolution_spec": {
+                        "relative_type": "to_date",
+                        "unit": "quarter",
+                        "direction": "current",
+                        "value": 1,
+                        "include_today": True,
+                    },
+                }
+            ],
+            "comparison_groups": [],
+        },
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.items[0].display_exact_time == "2026年4月1日至2026年4月15日"
+
+
 def test_resolve_holiday_window_uses_business_calendar():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
 

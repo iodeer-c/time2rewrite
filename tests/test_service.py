@@ -424,6 +424,78 @@ def test_process_query_can_render_previous_quarter_annotation_without_llm_config
     assert response["rewritten_query"] == "上季度（2026年1月1日至2026年3月31日）的收益是多少？"
 
 
+def test_process_query_can_render_previous_year_annotation_without_llm_config():
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "去年",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "relative_window",
+                        "reason_code": "relative_time",
+                        "resolution_spec": {
+                            "relative_type": "single_relative",
+                            "unit": "year",
+                            "direction": "previous",
+                            "value": 1,
+                            "include_today": False,
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+    )
+
+    response = service.process_query(
+        query="去年的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["rewritten_query"] == "去年（2025年1月1日至2025年12月31日）的收益是多少？"
+
+
+def test_process_query_can_render_quarter_to_date_annotation_without_llm_config():
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "本季度至今",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "relative_window",
+                        "reason_code": "rolling_or_to_date",
+                        "resolution_spec": {
+                            "relative_type": "to_date",
+                            "unit": "quarter",
+                            "direction": "current",
+                            "value": 1,
+                            "include_today": True,
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+    )
+
+    response = service.process_query(
+        query="本季度至今的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["rewritten_query"] == "本季度至今（2026年4月1日至2026年4月15日）的收益是多少？"
+
+
 def test_process_query_can_render_holiday_annotation_without_llm_config():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
     service = QueryPipelineService(
