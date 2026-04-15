@@ -280,6 +280,42 @@ def test_process_query_can_render_relative_day_annotation_without_llm_config():
     assert response["rewritten_query"] == "昨天（2026年4月14日）杭千公司的收益是多少？"
 
 
+def test_process_query_can_render_month_to_date_annotation_without_llm_config():
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "本月至今",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "relative_window",
+                        "reason_code": "rolling_or_to_date",
+                        "resolution_spec": {
+                            "relative_type": "to_date",
+                            "unit": "month",
+                            "direction": "current",
+                            "value": 1,
+                            "include_today": True,
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+    )
+
+    response = service.process_query(
+        query="本月至今的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["rewritten_query"] == "本月至今（2026年4月1日至2026年4月15日）的收益是多少？"
+
+
 def test_process_query_can_render_holiday_annotation_without_llm_config():
     calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
     service = QueryPipelineService(
@@ -374,3 +410,129 @@ def test_process_query_preserves_comparison_structure_for_reference_window():
     )
 
     assert response["rewritten_query"] == "今年3月和去年同期（2025年3月1日至2025年3月31日）相比收益增长了多少？"
+
+
+def test_process_query_can_render_offset_window_annotation_without_llm_config():
+    calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "去年国庆假期后3天",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "offset_window",
+                        "reason_code": "offset_from_anchor",
+                        "resolution_spec": {
+                            "base": {
+                                "source": "inline",
+                                "window": {
+                                    "kind": "holiday_window",
+                                    "value": {
+                                        "holiday_key": "national_day",
+                                        "year_ref": {"mode": "relative", "offset": -1},
+                                        "calendar_mode": "configured",
+                                    },
+                                },
+                            },
+                            "offset": {"direction": "after", "value": 3, "unit": "day"},
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+        business_calendar=calendar,
+    )
+
+    response = service.process_query(
+        query="去年国庆假期后3天的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["rewritten_query"] == "去年国庆假期后3天（2025年10月9日至2025年10月11日）的收益是多少？"
+
+
+def test_process_query_returns_null_when_holiday_calendar_data_is_missing():
+    calendar = JsonBusinessCalendar.from_root(root=Path("config/business_calendar"))
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "2030年清明假期",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "holiday_window",
+                        "reason_code": "holiday_or_business_calendar",
+                        "resolution_spec": {
+                            "holiday_key": "qingming",
+                            "year_ref": {"mode": "absolute", "year": 2030},
+                            "calendar_mode": "configured",
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+        business_calendar=calendar,
+    )
+
+    response = service.process_query(
+        query="2030年清明假期杭千公司的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["clarification_items"] == []
+    assert response["rewritten_query"] is None
+
+
+def test_process_query_returns_null_when_calendar_sensitive_query_has_no_calendar():
+    service = QueryPipelineService(
+        planner=FakePlanner(
+            {
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "render_text": "本月至今每个工作日",
+                        "ordinal": 1,
+                        "needs_clarification": True,
+                        "node_kind": "window_with_calendar_selector",
+                        "reason_code": "holiday_or_business_calendar",
+                        "resolution_spec": {
+                            "window": {
+                                "kind": "relative_window",
+                                "value": {
+                                    "relative_type": "to_date",
+                                    "unit": "month",
+                                    "direction": "current",
+                                    "value": 1,
+                                    "include_today": True,
+                                },
+                            },
+                            "selector": {"selector_type": "workday"},
+                        },
+                    }
+                ],
+                "comparison_groups": [],
+            }
+        ),
+        business_calendar=None,
+    )
+
+    response = service.process_query(
+        query="本月至今每个工作日的收益是多少？",
+        system_date="2026-04-15",
+        timezone="Asia/Shanghai",
+        rewrite=True,
+    )
+
+    assert response["clarification_items"] == []
+    assert response["rewritten_query"] is None

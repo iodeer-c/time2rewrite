@@ -17,6 +17,7 @@ from time_query_service.contracts import (
     HolidayWindowResolutionSpec,
     Interval,
     NestedWindowSpec,
+    OffsetWindowResolutionSpec,
     ReferenceWindowResolutionSpec,
     RelativeWindowResolutionSpec,
     StrictModel,
@@ -87,6 +88,14 @@ def _resolve_node_intervals(
             resolved_by_node_id=resolved_by_node_id,
             business_calendar=business_calendar,
         )
+    elif node.node_kind == "offset_window":
+        intervals = _resolve_offset_window_intervals(
+            node=node,
+            anchor_date=anchor_date,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
+            business_calendar=business_calendar,
+        )
     elif node.node_kind == "window_with_calendar_selector":
         spec = WindowWithCalendarSelectorResolutionSpec.model_validate(node.resolution_spec)
         start_date, end_date = _resolve_nested_window(spec.window, anchor_date=anchor_date)
@@ -121,10 +130,17 @@ def _resolve_relative_window_intervals(
     anchor_date: date,
 ) -> list[Interval]:
     spec = RelativeWindowResolutionSpec.model_validate(node.resolution_spec)
-    if spec.relative_type != "single_relative" or spec.unit != "day" or spec.direction != "previous":
-        raise ValueError("Current resolver slice only supports previous single-day relative windows.")
-    target_date = anchor_date - timedelta(days=spec.value)
-    return [Interval(start_date=target_date, end_date=target_date)]
+    if spec.relative_type == "single_relative" and spec.unit == "day" and spec.direction == "previous":
+        target_date = anchor_date - timedelta(days=spec.value)
+        return [Interval(start_date=target_date, end_date=target_date)]
+    if spec.relative_type == "to_date" and spec.unit == "month" and spec.direction == "current":
+        start_date = anchor_date.replace(day=1)
+        end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
+        return [Interval(start_date=start_date, end_date=end_date)]
+    raise ValueError(
+        "Current resolver slice only supports previous single-day relative windows "
+        "and current month-to-date windows."
+    )
 
 
 def _resolve_holiday_window_intervals(
@@ -202,6 +218,68 @@ def _resolve_reference_window_intervals(
     return [_shift_interval(interval, unit=spec.shift.unit, value=spec.shift.value) for interval in reference_intervals]
 
 
+def _resolve_offset_window_intervals(
+    *,
+    node: ClarificationNode,
+    anchor_date: date,
+    node_lookup: dict[str, ClarificationNode],
+    resolved_by_node_id: dict[str, list[Interval]],
+    business_calendar: BusinessCalendarPort | None,
+) -> list[Interval]:
+    spec = OffsetWindowResolutionSpec.model_validate(node.resolution_spec)
+    if spec.offset.unit != "day":
+        raise ValueError("Current resolver slice only supports day-based offset windows.")
+
+    base_intervals = _resolve_offset_base_intervals(
+        spec=spec,
+        anchor_date=anchor_date,
+        node_lookup=node_lookup,
+        resolved_by_node_id=resolved_by_node_id,
+        business_calendar=business_calendar,
+    )
+    if len(base_intervals) != 1:
+        raise ValueError("Current resolver slice only supports single-interval offset bases.")
+
+    base_interval = base_intervals[0]
+    count = spec.offset.value
+    if spec.offset.direction == "after":
+        start_date = base_interval.end_date + timedelta(days=1)
+        end_date = start_date + timedelta(days=count - 1)
+    else:
+        end_date = base_interval.start_date - timedelta(days=1)
+        start_date = end_date - timedelta(days=count - 1)
+    return [Interval(start_date=start_date, end_date=end_date)]
+
+
+def _resolve_offset_base_intervals(
+    *,
+    spec: OffsetWindowResolutionSpec,
+    anchor_date: date,
+    node_lookup: dict[str, ClarificationNode],
+    resolved_by_node_id: dict[str, list[Interval]],
+    business_calendar: BusinessCalendarPort | None,
+) -> list[Interval]:
+    if spec.base.source == "node_ref":
+        reference_node = node_lookup.get(spec.base.node_id)
+        if reference_node is None:
+            raise ValueError(f"Missing offset base node: {spec.base.node_id}")
+        return _resolve_node_intervals(
+            node=reference_node,
+            anchor_date=anchor_date,
+            business_calendar=business_calendar,
+            node_lookup=node_lookup,
+            resolved_by_node_id=resolved_by_node_id,
+        )
+
+    return _resolve_inline_window_intervals(
+        window=spec.base.window,
+        anchor_date=anchor_date,
+        business_calendar=business_calendar,
+        node_lookup=node_lookup,
+        resolved_by_node_id=resolved_by_node_id,
+    )
+
+
 def _resolve_anchor_date(
     *,
     system_date: str | None,
@@ -226,6 +304,33 @@ def _resolve_nested_window(window: NestedWindowSpec, *, anchor_date: date) -> tu
     start_date = anchor_date.replace(day=1)
     end_date = anchor_date if spec.include_today else anchor_date - timedelta(days=1)
     return start_date, end_date
+
+
+def _resolve_inline_window_intervals(
+    *,
+    window: NestedWindowSpec,
+    anchor_date: date,
+    business_calendar: BusinessCalendarPort | None,
+    node_lookup: dict[str, ClarificationNode],
+    resolved_by_node_id: dict[str, list[Interval]],
+) -> list[Interval]:
+    inline_node = ClarificationNode(
+        node_id="__inline__",
+        render_text="__inline__",
+        ordinal=0,
+        needs_clarification=False,
+        node_kind=window.kind,
+        reason_code="structural_enumeration",
+        resolution_spec=window.value,
+        surface_fragments=[],
+    )
+    return _resolve_node_intervals(
+        node=inline_node,
+        anchor_date=anchor_date,
+        business_calendar=business_calendar,
+        node_lookup=node_lookup,
+        resolved_by_node_id=resolved_by_node_id,
+    )
 
 
 def _resolve_year_ref(year_ref: YearRef, *, anchor_date: date) -> int:

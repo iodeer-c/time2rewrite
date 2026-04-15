@@ -105,7 +105,11 @@ def _locate_render_spans(
     search_start = 0
 
     for item in sorted(items, key=lambda value: value.ordinal):
-        index = original_query.find(item.render_text, search_start)
+        index = _locate_item_index(
+            original_query=original_query,
+            item=item,
+            search_start=search_start,
+        )
         if index < 0:
             return None
         span = (index, index + len(item.render_text), item)
@@ -113,6 +117,31 @@ def _locate_render_spans(
         search_start = span[1]
 
     return spans
+
+
+def _locate_item_index(
+    *,
+    original_query: str,
+    item: ClarificationItem,
+    search_start: int,
+) -> int:
+    occurrences = _find_occurrences(original_query, item.render_text)
+    if len(occurrences) > 1 and item.ordinal <= len(occurrences):
+        candidate = occurrences[item.ordinal - 1]
+        if candidate >= search_start:
+            return candidate
+    return original_query.find(item.render_text, search_start)
+
+
+def _find_occurrences(text: str, needle: str) -> list[int]:
+    indices: list[int] = []
+    search_start = 0
+    while True:
+        index = text.find(needle, search_start)
+        if index < 0:
+            return indices
+        indices.append(index)
+        search_start = index + len(needle)
 
 
 def _is_valid_annotation_output(output: str, *, item_count: int) -> bool:

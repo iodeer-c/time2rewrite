@@ -27,3 +27,20 @@ def test_annotate_query_returns_original_query_when_no_items():
         )
         == "2025年杭千公司每天的收益是多少？"
     )
+
+
+def test_annotate_query_uses_ordinal_for_repeated_render_text():
+    rewritten = annotate_query(
+        original_query="昨天和昨天的收益分别是多少？",
+        clarification_items=[
+            {
+                "node_id": "n2",
+                "render_text": "昨天",
+                "ordinal": 2,
+                "display_exact_time": "2026年4月14日",
+            }
+        ],
+        comparison_groups=[],
+    )
+
+    assert rewritten == "昨天和昨天（2026年4月14日）的收益分别是多少？"
