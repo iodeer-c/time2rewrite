@@ -1,7 +1,11 @@
 import json
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from time_query_service.contracts import ClarificationPlan
 from time_query_service.plan_validator import validate_plan
 from time_query_service.planner import ClarificationPlanner
+from time_query_service.planner_prompt import PLANNER_FEW_SHOTS, PLANNER_SYSTEM_PROMPT, build_planner_messages
 
 
 class FakeResponse:
@@ -40,6 +44,37 @@ def test_validate_plan_rejects_missing_comparison_member_node():
 
     assert result.is_valid is False
     assert any("missing" in error for error in result.errors)
+
+
+def test_planner_system_prompt_contains_core_constraints():
+    assert "时间澄清规划器" in PLANNER_SYSTEM_PROMPT
+    assert "只输出一个 JSON object" in PLANNER_SYSTEM_PROMPT
+    assert "render_text" in PLANNER_SYSTEM_PROMPT
+    assert "comparison_groups" in PLANNER_SYSTEM_PROMPT
+    assert "reference_window" in PLANNER_SYSTEM_PROMPT
+    assert "window_with_regular_grain" in PLANNER_SYSTEM_PROMPT
+
+
+def test_build_planner_messages_places_system_prompt_and_request_payload():
+    messages = build_planner_messages(
+        original_query="昨天杭千公司的收益是多少？",
+        system_date="2026-04-15",
+        system_datetime="2026-04-15 09:30:00",
+        timezone="Asia/Shanghai",
+    )
+
+    assert isinstance(messages[0], SystemMessage)
+    assert len(messages) > 3
+    assert isinstance(messages[-1], HumanMessage)
+
+    payload = json.loads(messages[-1].content)
+    assert payload["original_query"] == "昨天杭千公司的收益是多少？"
+    assert payload["system_date"] == "2026-04-15"
+
+
+def test_planner_few_shots_have_valid_clarification_plan_outputs():
+    for shot in PLANNER_FEW_SHOTS:
+        ClarificationPlan.model_validate(shot["output"])
 
 
 def test_planner_retries_once_when_first_plan_is_invalid():
