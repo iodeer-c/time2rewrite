@@ -514,7 +514,7 @@ PLANNER_FEW_SHOTS: list[dict[str, Any]] = [
                                 "value": {
                                     "holiday_key": "national_day",
                                     "year_ref": {"mode": "relative", "offset": -1},
-                                    "calendar_mode": "statutory",
+                                    "calendar_mode": "configured",
                                 },
                             },
                         },
