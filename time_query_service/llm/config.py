@@ -50,11 +50,18 @@ class LLMConfig(BaseModel):
         )
 
 
+class PipelineLoggingConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+
+
 class LLMRuntimeConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     default_role: str
     roles: dict[str, LLMConfig]
+    pipeline_logging: PipelineLoggingConfig = Field(default_factory=PipelineLoggingConfig)
 
     @model_validator(mode="after")
     def validate_default_role(self) -> "LLMRuntimeConfig":

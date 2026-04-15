@@ -1,5 +1,7 @@
 # Copy this file to config/llm.yaml and fill in real values locally.
 default_role: planner
+pipeline_logging:
+  enabled: false
 roles:
   planner:
     model_type: openai
