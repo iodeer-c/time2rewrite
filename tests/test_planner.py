@@ -107,15 +107,18 @@ def test_planner_few_shots_cover_expected_node_kinds():
         for shot in PLANNER_FEW_SHOTS
         for node in shot["output"]["nodes"]
     }
+    has_comparison_groups = any(shot["output"]["comparison_groups"] for shot in PLANNER_FEW_SHOTS)
 
     assert {
         "relative_window",
         "explicit_window",
         "holiday_window",
+        "offset_window",
         "reference_window",
         "window_with_regular_grain",
         "window_with_calendar_selector",
     }.issubset(node_kinds)
+    assert has_comparison_groups
 
 
 def test_planner_retries_once_when_first_plan_is_invalid():
