@@ -231,13 +231,13 @@ def _resolve_explicit_window_intervals(
 ) -> list[Interval]:
     spec = ExplicitWindowResolutionSpec.model_validate(node.resolution_spec)
     if spec.window_type == "single_date":
-        if spec.start_date is None:
-            raise ValueError("single_date explicit_window requires start_date")
         return [Interval(start_date=spec.start_date, end_date=spec.start_date)]
     if spec.window_type == "date_range":
-        if spec.start_date is None or spec.end_date is None:
-            raise ValueError("date_range explicit_window requires start_date and end_date")
         return [Interval(start_date=spec.start_date, end_date=spec.end_date)]
+    if spec.window_type == "named_period_range":
+        start_date = _resolve_named_period_point_start(spec=spec, anchor_date=anchor_date, point=spec.start_period)
+        end_date = _resolve_named_period_point_end(spec=spec, anchor_date=anchor_date, point=spec.end_period)
+        return [Interval(start_date=start_date, end_date=end_date)]
     if spec.window_type != "named_period":
         raise ValueError(f"Unsupported explicit window_type: {spec.window_type}")
 
@@ -257,8 +257,6 @@ def _resolve_explicit_window_intervals(
         end_day = calendar.monthrange(year, end_month)[1]
         return [Interval(start_date=date(year, start_month, 1), end_date=date(year, end_month, end_day))]
     if spec.calendar_unit == "half":
-        if spec.half is None:
-            raise ValueError("half explicit_window requires half")
         start_month = 1 if spec.half == 1 else 7
         end_month = 6 if spec.half == 1 else 12
         end_day = calendar.monthrange(year, end_month)[1]
@@ -418,10 +416,6 @@ def _filter_calendar_dates(
             matched.append(cursor)
         elif selector.selector_type == "business_day" and status.is_workday:
             matched.append(cursor)
-        elif selector.selector_type == "trading_day":
-            raise ValueError("trading_day selector is not implemented yet.")
-        elif selector.selector_type == "custom":
-            raise ValueError("custom calendar selectors are not implemented yet.")
         cursor += timedelta(days=1)
     return matched
 
@@ -487,6 +481,49 @@ def _add_years(value: date, years: int) -> date:
     if value.month == 2 and value.day == 29 and not calendar.isleap(target_year):
         return date(target_year, 2, 28)
     return date(target_year, value.month, value.day)
+
+
+def _resolve_named_period_point_start(
+    *,
+    spec: ExplicitWindowResolutionSpec,
+    anchor_date: date,
+    point,
+) -> date:
+    year = _resolve_year_ref(point.year_ref, anchor_date=anchor_date)
+    if spec.calendar_unit == "year":
+        return date(year, 1, 1)
+    if spec.calendar_unit == "month":
+        return date(year, point.month, 1)
+    if spec.calendar_unit == "quarter":
+        start_month = (point.quarter - 1) * 3 + 1
+        return date(year, start_month, 1)
+    if spec.calendar_unit == "half":
+        start_month = 1 if point.half == 1 else 7
+        return date(year, start_month, 1)
+    raise ValueError(f"Unsupported named_period_range calendar_unit: {spec.calendar_unit}")
+
+
+def _resolve_named_period_point_end(
+    *,
+    spec: ExplicitWindowResolutionSpec,
+    anchor_date: date,
+    point,
+) -> date:
+    year = _resolve_year_ref(point.year_ref, anchor_date=anchor_date)
+    if spec.calendar_unit == "year":
+        return date(year, 12, 31)
+    if spec.calendar_unit == "month":
+        end_day = calendar.monthrange(year, point.month)[1]
+        return date(year, point.month, end_day)
+    if spec.calendar_unit == "quarter":
+        end_month = point.quarter * 3
+        end_day = calendar.monthrange(year, end_month)[1]
+        return date(year, end_month, end_day)
+    if spec.calendar_unit == "half":
+        end_month = 6 if point.half == 1 else 12
+        end_day = calendar.monthrange(year, end_month)[1]
+        return date(year, end_month, end_day)
+    raise ValueError(f"Unsupported named_period_range calendar_unit: {spec.calendar_unit}")
 
 
 def _render_intervals(intervals: list[Interval]) -> str:

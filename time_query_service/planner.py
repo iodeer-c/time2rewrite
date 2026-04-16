@@ -33,6 +33,7 @@ class ClarificationPlanner:
         system_datetime: str | None = None,
         timezone: str = "Asia/Shanghai",
     ) -> ClarificationPlan:
+        previous_validation_errors: list[str] | None = None
         for attempt in range(1, 3):
             payload = self._plan_once(
                 original_query=original_query,
@@ -40,6 +41,7 @@ class ClarificationPlanner:
                 system_datetime=system_datetime,
                 timezone=timezone,
                 attempt=attempt,
+                previous_validation_errors=previous_validation_errors,
             )
             validation = validate_plan(payload)
             if validation.is_valid and validation.plan is not None:
@@ -56,6 +58,7 @@ class ClarificationPlanner:
                 validation.errors,
                 enabled=self._pipeline_logging_enabled,
             )
+            previous_validation_errors = validation.errors
         raise ValueError("Failed to build a valid ClarificationPlan after one retry.")
 
     def _plan_once(
@@ -66,6 +69,7 @@ class ClarificationPlanner:
         system_datetime: str | None,
         timezone: str,
         attempt: int,
+        previous_validation_errors: list[str] | None = None,
     ) -> dict[str, Any]:
         request_payload = {
             "original_query": original_query,
@@ -73,6 +77,8 @@ class ClarificationPlanner:
             "system_datetime": system_datetime,
             "timezone": timezone,
         }
+        if previous_validation_errors:
+            request_payload["previous_validation_errors"] = previous_validation_errors
         log_pipeline_event(
             "planner",
             f"attempt={attempt}.request_payload",
@@ -85,6 +91,7 @@ class ClarificationPlanner:
                 system_date=request_payload["system_date"],
                 system_datetime=request_payload["system_datetime"],
                 timezone=request_payload["timezone"],
+                previous_validation_errors=request_payload.get("previous_validation_errors"),
             )
         )
         raw_content = response.content if hasattr(response, "content") else response
