@@ -43,7 +43,7 @@ class ClarificationPlanner:
                 attempt=attempt,
                 previous_validation_errors=previous_validation_errors,
             )
-            validation = validate_plan(payload)
+            validation = validate_plan(payload, original_query=original_query)
             if validation.is_valid and validation.plan is not None:
                 log_pipeline_event(
                     "planner",

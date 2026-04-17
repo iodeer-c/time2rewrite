@@ -6,9 +6,11 @@ from typing import Any, Callable
 from time_query_service.annotation import AppendOnlyAnnotationRenderer
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
+from time_query_service.materialized_rewrite import render_materialized_query
+from time_query_service.plan_semantic_normalizer import NormalizationError, normalize_plan
 from time_query_service.pipeline_logging import log_pipeline_event
 from time_query_service.planner import ClarificationPlanner
-from time_query_service.time_resolver import resolve_plan
+from time_query_service.time_resolver import resolve_materialization_context, resolve_plan
 
 
 ResolverCallable = Callable[..., Any]
@@ -145,10 +147,50 @@ class QueryPipelineService:
 
         try:
             log_pipeline_event(
+                "normalizer",
+                "request",
+                {
+                    "clarification_plan": plan.model_dump(mode="python"),
+                },
+                enabled=pipeline_logging_enabled,
+            )
+            normalized_plan = normalize_plan(plan)
+        except NormalizationError as exc:
+            log_pipeline_event(
+                "normalizer",
+                "failure",
+                str(exc),
+                level=40,
+                enabled=pipeline_logging_enabled,
+            )
+            if not rewrite:
+                raise
+            response = {
+                "clarification_plan": plan.model_dump(mode="python"),
+                "clarification_items": [],
+                "rewritten_query": None,
+            }
+            log_pipeline_event(
+                "service",
+                "response",
+                response,
+                enabled=pipeline_logging_enabled,
+            )
+            return response
+        log_pipeline_event(
+            "normalizer",
+            "result",
+            normalized_plan.model_dump(mode="python"),
+            enabled=pipeline_logging_enabled,
+        )
+
+        try:
+            log_pipeline_event(
                 "resolver",
                 "request",
                 {
                     "clarification_plan": plan.model_dump(mode="python"),
+                    "normalized_plan": normalized_plan.model_dump(mode="python"),
                     "system_date": system_date,
                     "system_datetime": system_datetime,
                     "timezone": timezone,
@@ -156,7 +198,7 @@ class QueryPipelineService:
                 enabled=pipeline_logging_enabled,
             )
             resolution = self.resolver(
-                plan=plan,
+                plan=normalized_plan,
                 system_date=system_date,
                 system_datetime=system_datetime,
                 timezone=timezone,
@@ -201,27 +243,28 @@ class QueryPipelineService:
         else:
             try:
                 log_pipeline_event(
-                    "annotator",
+                    "materializer",
                     "request",
                     {
                         "original_query": query,
-                        "clarification_items": [
-                            item.model_dump(mode="python") for item in resolution.items
-                        ],
+                        "clarification_plan": plan.model_dump(mode="python"),
+                        "normalized_plan": normalized_plan.model_dump(mode="python"),
                         "comparison_groups": [
                             group.model_dump(mode="python") for group in plan.comparison_groups
                         ],
                     },
                     enabled=pipeline_logging_enabled,
                 )
-                rewritten_query = self.annotator.render(
-                    original_query=query,
-                    clarification_items=resolution.items,
-                    comparison_groups=plan.comparison_groups,
+                materialization_context = resolve_materialization_context(
+                    plan=normalized_plan,
+                    system_date=system_date,
+                    system_datetime=system_datetime,
+                    timezone=timezone,
+                    business_calendar=self._business_calendar,
                 )
             except ValueError as exc:
                 log_pipeline_event(
-                    "annotator",
+                    "materializer",
                     "failure",
                     str(exc),
                     level=40,
@@ -229,12 +272,68 @@ class QueryPipelineService:
                 )
                 rewritten_query = None
             else:
-                log_pipeline_event(
-                    "annotator",
-                    "result",
-                    {"rewritten_query": rewritten_query},
-                    enabled=pipeline_logging_enabled,
-                )
+                if materialization_context is not None:
+                    try:
+                        rewritten_query = render_materialized_query(
+                            original_query=query,
+                            context=materialization_context,
+                        )
+                    except ValueError as exc:
+                        log_pipeline_event(
+                            "materializer",
+                            "failure",
+                            str(exc),
+                            level=40,
+                            enabled=pipeline_logging_enabled,
+                        )
+                        rewritten_query = None
+                    else:
+                        log_pipeline_event(
+                            "materializer",
+                            "result",
+                            {
+                                "rewritten_query": rewritten_query,
+                                "context": materialization_context.model_dump(mode="python"),
+                            },
+                            enabled=pipeline_logging_enabled,
+                        )
+                else:
+                    try:
+                        log_pipeline_event(
+                            "annotator",
+                            "request",
+                            {
+                                "original_query": query,
+                                "clarification_items": [
+                                    item.model_dump(mode="python") for item in resolution.items
+                                ],
+                                "comparison_groups": [
+                                    group.model_dump(mode="python") for group in plan.comparison_groups
+                                ],
+                            },
+                            enabled=pipeline_logging_enabled,
+                        )
+                        rewritten_query = self.annotator.render(
+                            original_query=query,
+                            clarification_items=resolution.items,
+                            comparison_groups=plan.comparison_groups,
+                        )
+                    except ValueError as exc:
+                        log_pipeline_event(
+                            "annotator",
+                            "failure",
+                            str(exc),
+                            level=40,
+                            enabled=pipeline_logging_enabled,
+                        )
+                        rewritten_query = None
+                    else:
+                        log_pipeline_event(
+                            "annotator",
+                            "result",
+                            {"rewritten_query": rewritten_query},
+                            enabled=pipeline_logging_enabled,
+                        )
         response = {
             "clarification_plan": plan.model_dump(mode="python"),
             "clarification_items": [item.model_dump(mode="python") for item in resolution.items],

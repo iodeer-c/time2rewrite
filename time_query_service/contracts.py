@@ -25,9 +25,9 @@ NodeKind = Literal[
     "relative_window",
     "holiday_window",
     "offset_window",
-    "reference_window",
     "window_with_regular_grain",
     "window_with_calendar_selector",
+    "window_with_member_selection",
 ]
 
 ReasonCode = Literal[
@@ -51,7 +51,7 @@ RelationType = Literal[
 Direction = Literal["subject_to_reference", "reference_to_subject", "symmetric"]
 ComparisonRole = Literal["subject", "reference", "peer"]
 Alignment = Literal["same_period"]
-CalendarSelectorType = Literal["holiday", "workday", "business_day"]
+CalendarSelectorType = Literal["holiday", "workday"]
 CalendarMode = Literal["statutory", "configured"]
 WindowType = Literal["named_period", "named_period_range", "date_range", "single_date"]
 CalendarUnit = Literal["day", "week", "month", "quarter", "half", "year"]
@@ -61,13 +61,23 @@ OffsetDirection = Literal["before", "after"]
 RelativeUnit = Literal["day", "week", "month", "quarter", "year"]
 OffsetUnit = Literal["day"]
 ShiftUnit = Literal["day", "week", "month", "quarter", "year"]
-RegularGrain = Literal["day", "month", "quarter", "year"]
+RegularGrain = Literal["day", "week", "month", "quarter", "year"]
+MemberSelectionMode = Literal["first", "last", "nth", "nth_from_end"]
+InheritanceMode = Literal[
+    "scalar_projection",
+    "preserve_flat_carrier",
+    "preserve_grouped_carrier",
+    "rebind_nested_base",
+]
+CarrierPathSlot = Literal["window", "base"]
 NestedWindowKind = Literal[
     "explicit_window",
     "relative_window",
     "holiday_window",
-    "reference_window",
     "offset_window",
+    "window_with_regular_grain",
+    "window_with_calendar_selector",
+    "window_with_member_selection",
 ]
 
 
@@ -282,15 +292,37 @@ class OffsetWindowResolutionSpec(StrictModel):
     offset: OffsetSpec
 
 
-class ReferenceWindowResolutionSpec(StrictModel):
-    reference_node_id: str
+class RebindTargetPathSegment(StrictModel):
+    carrier_kind: NodeKind
+    slot: CarrierPathSlot
+
+
+class ReferenceDerivationSpec(StrictModel):
+    source_node_id: str
     alignment: Alignment
     shift: ShiftSpec
+    inheritance_mode: InheritanceMode
+    rebind_target_path: list[RebindTargetPathSegment] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_alignment(self) -> "ReferenceWindowResolutionSpec":
+    def validate_alignment(self) -> "ReferenceDerivationSpec":
         if self.alignment not in SUPPORTED_REFERENCE_ALIGNMENTS:
             raise ValueError(f"Unsupported reference alignment: {self.alignment}")
+        if self.inheritance_mode == "rebind_nested_base":
+            if not self.rebind_target_path:
+                raise ValueError("rebind_nested_base derivation requires rebind_target_path")
+        elif self.rebind_target_path:
+            raise ValueError("rebind_target_path is only supported when inheritance_mode=rebind_nested_base")
+        return self
+
+
+class CarrierSpec(StrictModel):
+    kind: NodeKind
+    value: Any
+
+    @model_validator(mode="after")
+    def validate_value(self) -> "CarrierSpec":
+        self.value = validate_resolution_spec_for_kind(self.kind, self.value)
         return self
 
 
@@ -304,14 +336,69 @@ class WindowWithCalendarSelectorResolutionSpec(StrictModel):
     selector: CalendarSelectorSpec
 
 
+class MemberSelectionSpec(StrictModel):
+    mode: MemberSelectionMode
+    index: int | None = None
+    count: int | None = None
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "MemberSelectionSpec":
+        if self.mode in {"first", "last"}:
+            if self.index is not None:
+                raise ValueError("first/last member selection does not support index")
+            if self.count is not None and self.count <= 0:
+                raise ValueError("first/last member selection count must be positive")
+            return self
+        if self.count is not None:
+            raise ValueError("nth/nth_from_end member selection does not support count")
+        if self.index is None or self.index <= 0:
+            raise ValueError("nth/nth_from_end member selection requires a positive index")
+        return self
+
+
+class WindowWithMemberSelectionResolutionSpec(StrictModel):
+    window: NestedWindowSpec
+    selection: MemberSelectionSpec
+
+
+def _nested_pairing_depth_for_window(window: NestedWindowSpec) -> int:
+    return _nested_pairing_depth_for_kind(window.kind, window.value)
+
+
+def _nested_pairing_depth_for_kind(kind: NestedWindowKind | NodeKind, payload: Any) -> int:
+    if kind in {
+        "explicit_window",
+        "relative_window",
+        "holiday_window",
+        "offset_window",
+    }:
+        return 0
+    if kind == "window_with_member_selection":
+        spec = WindowWithMemberSelectionResolutionSpec.model_validate(payload)
+        return _nested_pairing_depth_for_window(spec.window)
+    if kind == "window_with_calendar_selector":
+        spec = WindowWithCalendarSelectorResolutionSpec.model_validate(payload)
+        depth = _nested_pairing_depth_for_window(spec.window)
+        if spec.window.kind == "window_with_regular_grain":
+            return depth + 1
+        return depth
+    if kind == "window_with_regular_grain":
+        spec = WindowWithRegularGrainResolutionSpec.model_validate(payload)
+        depth = _nested_pairing_depth_for_window(spec.window)
+        if spec.window.kind == "window_with_regular_grain":
+            return depth + 1
+        return depth
+    raise ValueError(f"Unsupported nested pairing depth kind: {kind}")
+
+
 ResolutionSpec = (
     ExplicitWindowResolutionSpec
     | RelativeWindowResolutionSpec
     | HolidayWindowResolutionSpec
     | OffsetWindowResolutionSpec
-    | ReferenceWindowResolutionSpec
     | WindowWithRegularGrainResolutionSpec
     | WindowWithCalendarSelectorResolutionSpec
+    | WindowWithMemberSelectionResolutionSpec
 )
 
 NODE_KIND_TO_SPEC_MODEL: dict[NodeKind, type[ResolutionSpec]] = {
@@ -319,15 +406,66 @@ NODE_KIND_TO_SPEC_MODEL: dict[NodeKind, type[ResolutionSpec]] = {
     "relative_window": RelativeWindowResolutionSpec,
     "holiday_window": HolidayWindowResolutionSpec,
     "offset_window": OffsetWindowResolutionSpec,
-    "reference_window": ReferenceWindowResolutionSpec,
     "window_with_regular_grain": WindowWithRegularGrainResolutionSpec,
     "window_with_calendar_selector": WindowWithCalendarSelectorResolutionSpec,
+    "window_with_member_selection": WindowWithMemberSelectionResolutionSpec,
 }
 
 
 def validate_resolution_spec_for_kind(kind: NestedWindowKind | NodeKind, payload: Any) -> ResolutionSpec:
     spec_model = NODE_KIND_TO_SPEC_MODEL[kind]
     return spec_model.model_validate(payload)
+
+
+def _carrier_structure_for_window(window: NestedWindowSpec) -> str:
+    return _carrier_structure_for_kind(window.kind, window.value)
+
+
+def _carrier_structure_for_kind(kind: NestedWindowKind | NodeKind, payload: Any) -> str:
+    if kind in {"explicit_window", "relative_window", "holiday_window", "offset_window"}:
+        return "scalar"
+    if kind == "window_with_regular_grain":
+        spec = WindowWithRegularGrainResolutionSpec.model_validate(payload)
+        if spec.window.kind == "window_with_regular_grain":
+            return "grouped_enumeration"
+        return "flat_enumeration"
+    if kind == "window_with_calendar_selector":
+        spec = WindowWithCalendarSelectorResolutionSpec.model_validate(payload)
+        if spec.window.kind == "window_with_regular_grain":
+            return "grouped_enumeration"
+        return "flat_enumeration"
+    if kind == "window_with_member_selection":
+        spec = WindowWithMemberSelectionResolutionSpec.model_validate(payload)
+        return _carrier_structure_for_window(spec.window)
+    raise ValueError(f"Unsupported carrier structure kind: {kind}")
+
+
+def _validate_rebind_target_path(carrier: CarrierSpec, path: list[RebindTargetPathSegment]) -> None:
+    current_kind = carrier.kind
+    current_value: Any = carrier.value
+
+    for segment in path:
+        if segment.carrier_kind != current_kind:
+            raise ValueError(
+                f"rebind_target_path segment carrier_kind={segment.carrier_kind} does not match current carrier kind={current_kind}"
+            )
+        if current_kind in {"window_with_regular_grain", "window_with_calendar_selector", "window_with_member_selection"}:
+            if segment.slot != "window":
+                raise ValueError(f"carrier kind={current_kind} only supports rebind_target_path slot=window")
+            nested_window = current_value.window
+            current_kind = nested_window.kind
+            current_value = nested_window.value
+            continue
+        if current_kind == "offset_window":
+            if segment.slot != "base":
+                raise ValueError("carrier kind=offset_window only supports rebind_target_path slot=base")
+            if current_value.base.source != "inline":
+                raise ValueError("rebind_target_path does not support offset base=node_ref")
+            nested_window = current_value.base.window
+            current_kind = nested_window.kind
+            current_value = nested_window.value
+            continue
+        raise ValueError(f"carrier kind={current_kind} does not support rebind_target_path traversal")
 
 
 class ComparisonMember(StrictModel):
@@ -341,6 +479,7 @@ class ComparisonGroup(StrictModel):
     anchor_text: str
     anchor_ordinal: int
     direction: Direction
+    surface_fragments: list[str] = Field(default_factory=list)
     members: list[ComparisonMember]
 
 
@@ -369,17 +508,130 @@ class ClarificationNode(StrictModel):
     render_text: str
     ordinal: int
     needs_clarification: bool
-    node_kind: NodeKind
     reason_code: ReasonCode
-    resolution_spec: Any
+    carrier: CarrierSpec
+    derivation: ReferenceDerivationSpec | None = None
     surface_fragments: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "carrier" in data:
+            return data
+        if "node_kind" not in data or "resolution_spec" not in data:
+            return data
+        if data["node_kind"] == "reference_window":
+            return data
+        coerced = dict(data)
+        coerced["carrier"] = {
+            "kind": coerced.pop("node_kind"),
+            "value": coerced.pop("resolution_spec"),
+        }
+        return coerced
+
+    @property
+    def node_kind(self) -> NodeKind:
+        return self.carrier.kind
+
+    @property
+    def resolution_spec(self) -> ResolutionSpec:
+        return self.carrier.value
+
     @model_validator(mode="after")
-    def validate_resolution_spec(self) -> "ClarificationNode":
-        self.resolution_spec = validate_resolution_spec_for_kind(self.node_kind, self.resolution_spec)
+    def validate_derivation_compatibility(self) -> "ClarificationNode":
+        if self.derivation is None:
+            return self
+
+        carrier_structure = _carrier_structure_for_kind(self.carrier.kind, self.carrier.value)
+        if self.derivation.inheritance_mode == "scalar_projection" and carrier_structure != "scalar":
+            raise ValueError("scalar_projection derivation requires a scalar carrier")
+        if self.derivation.inheritance_mode == "preserve_flat_carrier" and carrier_structure != "flat_enumeration":
+            raise ValueError("preserve_flat_carrier derivation requires a flat enumeration carrier")
+        if self.derivation.inheritance_mode == "preserve_grouped_carrier" and carrier_structure != "grouped_enumeration":
+            raise ValueError("preserve_grouped_carrier derivation requires a grouped enumeration carrier")
+        if self.derivation.inheritance_mode == "rebind_nested_base":
+            if carrier_structure != "grouped_enumeration":
+                raise ValueError("rebind_nested_base derivation requires a grouped enumeration carrier")
+            _validate_rebind_target_path(self.carrier, self.derivation.rebind_target_path)
         return self
 
 
 class ClarificationPlan(StrictModel):
     nodes: list[ClarificationNode]
     comparison_groups: list[ComparisonGroup] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_contract_boundaries(self) -> "ClarificationPlan":
+        node_lookup = {node.node_id: node for node in self.nodes}
+        nested_group_count = 0
+
+        for node in self.nodes:
+            if node.derivation is None:
+                continue
+            if node.derivation.source_node_id not in node_lookup:
+                raise ValueError(f"Missing derivation source node_id={node.derivation.source_node_id} for {node.node_id}")
+            source_node = node_lookup[node.derivation.source_node_id]
+            source_structure = _carrier_structure_for_kind(source_node.node_kind, source_node.resolution_spec)
+            target_structure = _carrier_structure_for_kind(node.node_kind, node.resolution_spec)
+            if node.derivation.inheritance_mode == "scalar_projection" and source_structure != "scalar":
+                raise ValueError(
+                    f"scalar_projection derivation requires a scalar source carrier for {node.node_id}"
+                )
+            if node.derivation.inheritance_mode == "preserve_flat_carrier" and source_structure != "flat_enumeration":
+                raise ValueError(
+                    f"preserve_flat_carrier derivation requires a flat source carrier for {node.node_id}"
+                )
+            if (
+                node.derivation.inheritance_mode in {"preserve_grouped_carrier", "rebind_nested_base"}
+                and source_structure != "grouped_enumeration"
+            ):
+                raise ValueError(
+                    f"{node.derivation.inheritance_mode} derivation requires a grouped source carrier for {node.node_id}"
+                )
+            if node.derivation.inheritance_mode == "scalar_projection" and target_structure != "scalar":
+                raise ValueError(
+                    f"scalar_projection derivation requires a scalar target carrier for {node.node_id}"
+                )
+            if node.derivation.inheritance_mode == "preserve_flat_carrier" and target_structure != "flat_enumeration":
+                raise ValueError(
+                    f"preserve_flat_carrier derivation requires a flat target carrier for {node.node_id}"
+                )
+            if (
+                node.derivation.inheritance_mode in {"preserve_grouped_carrier", "rebind_nested_base"}
+                and target_structure != "grouped_enumeration"
+            ):
+                raise ValueError(
+                    f"{node.derivation.inheritance_mode} derivation requires a grouped target carrier for {node.node_id}"
+                )
+
+        for group in self.comparison_groups:
+            member_ids = {member.node_id for member in group.members}
+            depths: list[int] = []
+            for member in group.members:
+                node = node_lookup.get(member.node_id)
+                if node is None:
+                    continue
+                if node.derivation is not None and node.derivation.source_node_id not in member_ids:
+                    raise ValueError(
+                        f"comparison_group={group.group_id} requires derived member {node.node_id} to reference a family-local source node"
+                    )
+                depths.append(_nested_pairing_depth_for_kind(node.node_kind, node.resolution_spec))
+
+            if any(depth > 1 for depth in depths):
+                raise ValueError("Nested pairing only supports one-level child structure beneath a comparison parent.")
+
+            if any(depth == 1 for depth in depths):
+                if len(group.members) != 2:
+                    raise ValueError("Nested pairing only supports two-member comparison groups.")
+                if not all(depth == 1 for depth in depths):
+                    raise ValueError(
+                        "Nested pairing requires both comparison members to carry the same one-level child structure."
+                    )
+                nested_group_count += 1
+
+        if nested_group_count and len(self.comparison_groups) > 1:
+            raise ValueError("Nested pairing does not support multiple comparison families in the same plan.")
+
+        return self

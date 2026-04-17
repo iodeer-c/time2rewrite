@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from time_query_service.contracts import ClarificationItem, ComparisonGroup
+from time_query_service.render_spans import locate_render_spans
 
 
 ANNOTATOR_SYSTEM_PROMPT = """
@@ -73,7 +74,7 @@ class AppendOnlyAnnotationRenderer:
         return content if _is_valid_annotation_output(content, item_count=len(items)) else None
 
     def _render_deterministically(self, *, original_query: str, items: list[ClarificationItem]) -> str | None:
-        located_spans = _locate_render_spans(original_query=original_query, items=items)
+        located_spans = locate_render_spans(original_query=original_query, render_targets=items)
         if located_spans is None:
             return None
 
@@ -94,80 +95,6 @@ class AppendOnlyAnnotationRenderer:
     @staticmethod
     def _normalize_group(group: ComparisonGroup | dict[str, Any]) -> ComparisonGroup:
         return group if isinstance(group, ComparisonGroup) else ComparisonGroup.model_validate(group)
-
-
-def _locate_render_spans(
-    *,
-    original_query: str,
-    items: list[ClarificationItem],
-) -> list[tuple[int, int, ClarificationItem]] | None:
-    spans: list[tuple[int, int, ClarificationItem]] = []
-    search_start = 0
-
-    for item in sorted(items, key=lambda value: value.ordinal):
-        span = _locate_item_span(
-            original_query=original_query,
-            item=item,
-            search_start=search_start,
-        )
-        if span is None:
-            return None
-        spans.append((span[0], span[1], item))
-        search_start = span[1]
-
-    return spans
-
-
-def _locate_item_span(
-    *,
-    original_query: str,
-    item: ClarificationItem,
-    search_start: int,
-) -> tuple[int, int] | None:
-    occurrences = _find_occurrences(original_query, item.render_text)
-    if len(occurrences) > 1 and item.ordinal <= len(occurrences):
-        candidate = occurrences[item.ordinal - 1]
-        if candidate >= search_start:
-            return (candidate, candidate + len(item.render_text))
-    direct_index = original_query.find(item.render_text, search_start)
-    if direct_index >= 0:
-        return (direct_index, direct_index + len(item.render_text))
-    if item.surface_fragments:
-        return _locate_surface_fragment_span(
-            original_query=original_query,
-            item=item,
-            search_start=search_start,
-        )
-    return None
-
-
-def _locate_surface_fragment_span(
-    *,
-    original_query: str,
-    item: ClarificationItem,
-    search_start: int,
-) -> tuple[int, int] | None:
-    current_search_start = search_start
-    first_fragment_span: tuple[int, int] | None = None
-    for fragment in item.surface_fragments:
-        fragment_index = original_query.find(fragment, current_search_start)
-        if fragment_index < 0:
-            return None
-        if first_fragment_span is None:
-            first_fragment_span = (fragment_index, fragment_index + len(fragment))
-        current_search_start = fragment_index + len(fragment)
-    return first_fragment_span
-
-
-def _find_occurrences(text: str, needle: str) -> list[int]:
-    indices: list[int] = []
-    search_start = 0
-    while True:
-        index = text.find(needle, search_start)
-        if index < 0:
-            return indices
-        indices.append(index)
-        search_start = index + len(needle)
 
 
 def _is_valid_annotation_output(output: str, *, item_count: int) -> bool:
