@@ -1,0 +1,47 @@
+# Copy this file to config/llm.yaml and fill in real values locally.
+default_role: planner
+pipeline_logging:
+  enabled: false
+roles:
+  planner:
+    model_type: openai
+    model_name: qwen3-max
+    api_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: PLANNER_API_KEY
+    api_key: ""
+    proxy_url_env: PLANNER_PROXY_URL
+    proxy_url: ""
+    verify_ssl: false
+    additional_params:
+      temperature: 0
+      stream_usage: true
+      extra_body:
+        enable_thinking: false
+  annotator:
+    model_type: openai
+    model_name: qwen-plus
+    api_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: ANNOTATOR_API_KEY
+    api_key: ""
+    proxy_url_env: ANNOTATOR_PROXY_URL
+    proxy_url: ""
+    verify_ssl: false
+    additional_params:
+      temperature: 0
+      stream_usage: true
+      extra_body:
+        enable_thinking: false
+  fallback:
+    model_type: openai
+    model_name: qwen-plus
+    api_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: FALLBACK_API_KEY
+    api_key: ""
+    proxy_url_env: FALLBACK_PROXY_URL
+    proxy_url: ""
+    verify_ssl: false
+    additional_params:
+      temperature: 0
+      stream_usage: true
+      extra_body:
+        enable_thinking: false
