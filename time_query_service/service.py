@@ -157,6 +157,12 @@ class QueryPipelineService:
             time_plan=time_plan,
             resolved_plan=resolved_plan,
         )
+        log_pipeline_event(
+            "service",
+            "clarification_facts",
+            [item.model_dump(mode="python") for item in clarification_items],
+            enabled=pipeline_logging_enabled,
+        )
         if rewrite:
             clarified_query = render_clarified_query(
                 original_query=query,

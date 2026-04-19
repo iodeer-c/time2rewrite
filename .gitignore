@@ -9,3 +9,4 @@ stage_a_live_report.json
 stage_b_live_report.json
 manual_rewrite_review.json
 manual_rewrite_tail.json
+tests/
