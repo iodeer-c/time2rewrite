@@ -16,7 +16,7 @@ from time_query_service.post_processor import (
     StageBOutput,
 )
 from time_query_service.resolved_plan import Interval, IntervalTree, ResolvedComparison, ResolvedComparisonPair, ResolvedNode, ResolvedPlan, TreeLabels
-from time_query_service.time_plan import Carrier, GroupedTemporalValue, NamedPeriod, StandaloneContent, TimePlan, Unit
+from time_query_service.time_plan import Carrier, GroupedTemporalValue, MappedRange, NamedPeriod, StandaloneContent, TimePlan, Unit
 
 
 def _atom_node(start: date, end: date, *, unit_id: str = "u1") -> tuple[str, ResolvedNode]:
@@ -1001,6 +1001,100 @@ def test_evaluate_layer1_golden_runs_pipeline_and_summarizes_by_tier() -> None:
     }
     assert report["results"][0]["passed"] is True
     assert report["results"][0]["clarified_query"] == "2025年3月收益（2025年3月指2025年3月1日至2025年3月31日）"
+    assert report["results"][0]["clarified_query_validation"]["passed"] is True
+
+
+def test_evaluate_layer1_golden_asserts_single_unit_bounded_range_ownership() -> None:
+    from time_query_service.evaluator import evaluate_layer1_golden
+
+    expected_stage_a = StageAOutput.model_validate(
+        {
+            "query": "2025年9月到12月收益",
+            "system_date": "2026-04-17",
+            "timezone": "Asia/Shanghai",
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年9月到12月",
+                    "surface_fragments": [{"start": 0, "end": 11}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年9月到12月",
+                    "sources": [],
+                }
+            ],
+            "comparisons": [],
+        }
+    )
+    expected_stage_b = StageBOutput.model_validate(
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 9},
+                    "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        }
+    )
+    interval = Interval(start=date(2025, 9, 1), end=date(2025, 12, 31), end_inclusive=True)
+    layer1_case = {
+        "query": "2025年9月到12月收益",
+        "system_date": "2026-04-17",
+        "tier": 1,
+        "expected_time_plan": TimePlan(
+            query="2025年9月到12月收益",
+            system_date=date(2026, 4, 17),
+            timezone="Asia/Shanghai",
+            units=[
+                Unit(
+                    unit_id="u1",
+                    render_text="2025年9月到12月",
+                    surface_fragments=[{"start": 0, "end": 11}],
+                    content=StandaloneContent(
+                        content_kind="standalone",
+                        carrier=Carrier(
+                            anchor=MappedRange(
+                                kind="mapped_range",
+                                mode="bounded_pair",
+                                start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9),
+                                end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12),
+                            ),
+                            modifiers=[],
+                        ),
+                    ),
+                )
+            ],
+            comparisons=[],
+        ),
+        "expected_resolved_plan": _resolved_plan(
+            (
+                "u1",
+                ResolvedNode(
+                    tree=IntervalTree(role="atom", intervals=[interval], children=[], labels=TreeLabels(absolute_core_time=interval)),
+                    derived_from=[],
+                ),
+            )
+        ),
+        "capability_tags": ["bounded-range-unit-normalization"],
+    }
+    stage_a_runner = _StringRunner([json.dumps(expected_stage_a.model_dump(mode="json"), ensure_ascii=False)])
+    stage_b_runner = _StringRunner([json.dumps(expected_stage_b.model_dump(mode="json"), ensure_ascii=False)])
+
+    report = evaluate_layer1_golden(
+        cases=[layer1_case],
+        stage_a_runner=stage_a_runner,
+        stage_b_runner=stage_b_runner,
+        business_calendar=_calendar(),
+        max_stage_b_concurrent=1,
+    )
+
+    assert report["results"][0]["passed"] is True
+    assert report["results"][0]["time_plan_validation"]["passed"] is True
+    assert report["results"][0]["clarification_items_validation"]["passed"] is True
+    assert report["results"][0]["clarified_query"] == "2025年9月到12月收益（2025年9月到12月指2025年9月1日至2025年12月31日）"
     assert report["results"][0]["clarified_query_validation"]["passed"] is True
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any, Literal
+import re
 
 from pydantic import Field
 
@@ -102,7 +103,14 @@ def _render_deterministically(
     original_query: str,
     clarification_facts: list[ClarificationFact],
 ) -> str:
-    parts = [_render_fact(fact) for fact in clarification_facts]
+    fallback_fact = _coalesce_split_bounded_range_facts(
+        original_query=original_query,
+        clarification_facts=clarification_facts,
+    )
+    if fallback_fact is not None:
+        parts = [_render_fact(fallback_fact)]
+    else:
+        parts = [_render_fact(fact) for fact in clarification_facts]
     return f"{original_query}（{'；'.join(parts)}）"
 
 
@@ -161,6 +169,80 @@ def _grouping_phrase(grain: str) -> str:
         "year": "自然年",
     }
     return mapping.get(grain, grain)
+
+
+def _coalesce_split_bounded_range_facts(
+    *,
+    original_query: str,
+    clarification_facts: list[ClarificationFact],
+) -> ClarificationFact | None:
+    # Defensive fallback only. Canonical bounded-range success must come from one upstream unit/fact.
+    if len(clarification_facts) != 2:
+        return None
+    left, right = clarification_facts
+    if any(fact.status != "resolved" or fact.resolved_text is None for fact in clarification_facts):
+        return None
+    if any(
+        fact.grouping_grain is not None or fact.derived_from or fact.comparison_peers or fact.reason_kind is not None
+        for fact in clarification_facts
+    ):
+        return None
+
+    left_span = _find_span_after(original_query, left.label, 0)
+    if left_span is None:
+        return None
+    right_span = _find_span_after(original_query, right.label, left_span[1])
+    if right_span is None:
+        return None
+
+    connector = original_query[left_span[1]:right_span[0]].strip()
+    if connector not in {"到", "至", "-", "~", "～"}:
+        return None
+
+    left_interval = _parse_interval_text(left.resolved_text)
+    right_interval = _parse_interval_text(right.resolved_text)
+    if left_interval is None or right_interval is None:
+        return None
+    if right_interval.end < left_interval.start:
+        return None
+
+    range_label = original_query[left_span[0]:right_span[1]]
+    merged = Interval(start=left_interval.start, end=right_interval.end, end_inclusive=True)
+    return ClarificationFact(
+        unit_id=f"{left.unit_id}+{right.unit_id}",
+        label=range_label,
+        status="resolved",
+        resolved_text=_format_interval(merged),
+    )
+
+
+def _find_span_after(query: str, text: str, start_at: int) -> tuple[int, int] | None:
+    start = query.find(text, start_at)
+    if start < 0:
+        return None
+    return (start, start + len(text))
+
+
+def _parse_interval_text(text: str) -> Interval | None:
+    parts = text.split("至", 1)
+    if len(parts) == 1:
+        start = _parse_date_text(parts[0])
+        if start is None:
+            return None
+        return Interval(start=start, end=start, end_inclusive=True)
+    start = _parse_date_text(parts[0])
+    end = _parse_date_text(parts[1])
+    if start is None or end is None:
+        return None
+    return Interval(start=start, end=end, end_inclusive=True)
+
+
+def _parse_date_text(text: str) -> date | None:
+    match = re.fullmatch(r"\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*", text)
+    if match is None:
+        return None
+    year, month, day = (int(group) for group in match.groups())
+    return date(year, month, day)
 
 
 def _requires_llm_writer(clarification_facts: list[ClarificationFact]) -> bool:

@@ -189,3 +189,73 @@ def test_stage_b_prompt_covers_todate_offset_and_day_expansion_shapes() -> None:
     assert by_text["2025年3月往后一个月"]["carrier"]["modifiers"] == [{"kind": "offset", "value": 1, "unit": "month"}]
     assert by_text["2025年每天"]["carrier"]["anchor"]["kind"] == "named_period"
     assert by_text["2025年每天"]["carrier"]["modifiers"] == [{"kind": "grain_expansion", "target_grain": "day"}]
+
+
+def test_stage_b_prompt_covers_bounded_range_canonical_shapes() -> None:
+    messages = build_stage_b_messages(
+        text="2025年9月到12月",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    by_text = _few_shot_examples_by_text(messages)
+
+    assert by_text["2025年9月到12月"]["carrier"]["anchor"]["kind"] == "mapped_range"
+    assert by_text["2025年9月到12月"]["carrier"]["anchor"]["mode"] == "bounded_pair"
+    assert by_text["2025年3月1日到3月10日"]["carrier"]["anchor"]["kind"] == "date_range"
+
+
+def test_stage_b_prompt_covers_cross_year_and_cross_grain_bounded_ranges() -> None:
+    messages = build_stage_b_messages(
+        text="去年12月到3月",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    by_text = _few_shot_examples_by_text(messages)
+
+    cross_year = by_text["去年12月到3月"]["carrier"]["anchor"]
+    assert cross_year["kind"] == "mapped_range"
+    assert cross_year["start"]["year"] == 2025
+    assert cross_year["end"]["year"] == 2026
+
+    cross_grain = by_text["2025年Q3到10月"]["carrier"]["anchor"]
+    assert cross_grain["kind"] == "mapped_range"
+    assert cross_grain["start"]["period_type"] == "quarter"
+    assert cross_grain["end"]["period_type"] == "month"
+
+    month_to_day = by_text["2025年9月到10月15日"]["carrier"]["anchor"]
+    assert month_to_day["kind"] == "mapped_range"
+    assert month_to_day["start"]["period_type"] == "month"
+    assert month_to_day["end"]["period_type"] == "day"
+
+
+def test_stage_b_prompt_keeps_grouped_bounded_range_on_one_parent() -> None:
+    messages = build_stage_b_messages(
+        text="2025年1月到3月每个月的每个工作日",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    by_text = _few_shot_examples_by_text(messages)
+
+    grouped = by_text["2025年1月到3月每个月的每个工作日"]["carrier"]
+    assert grouped["anchor"]["kind"] == "grouped_temporal_value"
+    assert grouped["anchor"]["parent"]["kind"] == "mapped_range"
+    assert grouped["anchor"]["parent"]["mode"] == "bounded_pair"
+    assert grouped["modifiers"] == [{"kind": "calendar_filter", "day_class": "workday"}]
+
+
+def test_stage_b_prompt_degrades_unsupported_bounded_range_endpoint_classes() -> None:
+    messages = build_stage_b_messages(
+        text="去年9月到国庆假期",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    by_text = _few_shot_examples_by_text(messages)
+
+    assert by_text["去年9月到国庆假期"]["needs_clarification"] is True
+    assert by_text["去年9月到国庆假期"]["reason_kind"] == "unsupported_anchor_semantics"
+    assert by_text["最近一周到上周五"]["needs_clarification"] is True
+    assert by_text["最近一周到上周五"]["reason_kind"] == "unsupported_anchor_semantics"

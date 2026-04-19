@@ -134,6 +134,8 @@ def evaluate_layer1_golden(
         resolved_plan = None
         clarification_facts: list[ClarificationFact] | None = None
         clarified_query: str | None = None
+        time_plan_validation: ComparatorResult | None = None
+        clarification_items_validation: ComparatorResult | None = None
         clarified_query_validation: ComparatorResult | None = None
         try:
             stage_a = run_stage_a(
@@ -177,6 +179,8 @@ def evaluate_layer1_golden(
                 time_plan=time_plan,
                 resolved_plan=resolved_plan,
             )
+            time_plan_validation = clarification_plan_ownership(case["expected_time_plan"], time_plan)
+            clarification_items_validation = clarification_fact_ownership(case["expected_time_plan"], clarification_facts)
             clarified_query = render_clarified_query(
                 original_query=case["query"],
                 clarification_facts=clarification_facts,
@@ -199,6 +203,12 @@ def evaluate_layer1_golden(
         else:
             comparison = resolved_plan_equals(case["expected_resolved_plan"], resolved_plan)
         passed = case_passes(comparison)
+        if time_plan_validation is not None:
+            passed = passed and time_plan_validation.passed
+        if clarification_items_validation is not None:
+            passed = passed and clarification_items_validation.passed
+        if clarified_query_validation is not None:
+            passed = passed and clarified_query_validation.passed
         tier_buckets.setdefault(case["tier"], []).append(passed)
         if clarified_query_validation is not None:
             clarified_query_outcomes.append(clarified_query_validation.passed)
@@ -210,9 +220,21 @@ def evaluate_layer1_golden(
                 "diffs": _serialize_diffs(comparison.diffs),
                 "actual_time_plan": time_plan.model_dump(mode="python") if time_plan is not None else None,
                 "actual_resolved_plan": resolved_plan.model_dump(mode="python") if resolved_plan is not None else None,
+                "time_plan_validation": None
+                if time_plan_validation is None
+                else {
+                    "passed": time_plan_validation.passed,
+                    "diffs": _serialize_diffs(time_plan_validation.diffs),
+                },
                 "clarification_items": None
                 if clarification_facts is None
                 else [fact.model_dump(mode="python") for fact in clarification_facts],
+                "clarification_items_validation": None
+                if clarification_items_validation is None
+                else {
+                    "passed": clarification_items_validation.passed,
+                    "diffs": _serialize_diffs(clarification_items_validation.diffs),
+                },
                 "clarified_query": clarified_query,
                 "clarified_query_validation": None
                 if clarified_query_validation is None
@@ -430,6 +452,42 @@ def clarified_query_completeness(
     return ComparatorResult(diffs=diffs)
 
 
+def clarification_plan_ownership(
+    expected: TimePlan | dict[str, Any],
+    actual: TimePlan | dict[str, Any],
+) -> ComparatorResult:
+    expected_payload = _coerce_time_plan(expected)
+    actual_payload = _coerce_time_plan(actual)
+    diffs: list[ComparatorDiff] = []
+
+    expected_units = [(unit.unit_id, unit.render_text) for unit in expected_payload.units]
+    actual_units = [(unit.unit_id, unit.render_text) for unit in actual_payload.units]
+    if expected_units != actual_units:
+        diffs.append(ComparatorDiff("clarification_plan.units", expected_units, actual_units))
+
+    expected_comparisons = [comparison.comparison_id for comparison in expected_payload.comparisons]
+    actual_comparisons = [comparison.comparison_id for comparison in actual_payload.comparisons]
+    if expected_comparisons != actual_comparisons:
+        diffs.append(ComparatorDiff("clarification_plan.comparisons", expected_comparisons, actual_comparisons))
+
+    return ComparatorResult(diffs=diffs)
+
+
+def clarification_fact_ownership(
+    expected_time_plan: TimePlan | dict[str, Any],
+    clarification_facts: list[ClarificationFact],
+) -> ComparatorResult:
+    expected_payload = _coerce_time_plan(expected_time_plan)
+    diffs: list[ComparatorDiff] = []
+
+    expected_pairs = [(unit.unit_id, unit.render_text) for unit in expected_payload.units]
+    actual_pairs = [(fact.unit_id, fact.label) for fact in clarification_facts]
+    if expected_pairs != actual_pairs:
+        diffs.append(ComparatorDiff("clarification_items", expected_pairs, actual_pairs))
+
+    return ComparatorResult(diffs=diffs)
+
+
 def lint_layer1_case(case: dict[str, Any]) -> None:
     expected_time_plan = case.get("expected_time_plan")
     if expected_time_plan is None:
@@ -480,6 +538,15 @@ def _coerce_stage_b(payload: StageBOutput | dict[str, Any] | str) -> StageBOutpu
         return StageBOutput.model_validate(payload)
     except (json.JSONDecodeError, ValidationError) as exc:
         raise GoldenCaseAuthoringError(f"invalid Stage B payload: {exc}") from exc
+
+
+def _coerce_time_plan(payload: TimePlan | dict[str, Any]) -> TimePlan:
+    try:
+        if isinstance(payload, TimePlan):
+            return payload
+        return TimePlan.model_validate(payload)
+    except ValidationError as exc:
+        raise GoldenCaseAuthoringError(f"invalid TimePlan payload: {exc}") from exc
 
 
 def _compare_stage_a_unit(

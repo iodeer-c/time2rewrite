@@ -21,6 +21,7 @@ from time_query_service.time_plan import (
     Comparison,
     ComparisonPair,
     Content,
+    DateRange,
     DerivationSource,
     EnumerationSet,
     GrainExpansion,
@@ -296,6 +297,7 @@ def _validate_layer3(query: str, units: list[StageAUnitOutput], stage_b: dict[st
                 unit_id=unit.unit_id or f"__index_{index}__",
                 details="derived unit requires non-empty sources",
             )
+    _validate_bounded_range_single_unit(query, units, stage_b)
 
 
 def _validate_layer4(
@@ -377,6 +379,51 @@ def _stage_b_lookup_key(index: int, unit: StageAUnitOutput) -> str:
 
 def _surface_text(query: str, fragments: list[SurfaceFragment]) -> str:
     return "".join(query[fragment.start:fragment.end] for fragment in fragments)
+
+
+def _validate_bounded_range_single_unit(
+    query: str,
+    units: list[StageAUnitOutput],
+    stage_b: dict[str, StageBOutput],
+) -> None:
+    for index in range(len(units) - 1):
+        left = units[index]
+        right = units[index + 1]
+        if left.content_kind != "standalone" or right.content_kind != "standalone":
+            continue
+        if not left.surface_fragments or not right.surface_fragments:
+            continue
+
+        left_output = stage_b.get(_stage_b_lookup_key(index, left))
+        right_output = stage_b.get(_stage_b_lookup_key(index + 1, right))
+        if left_output is None or right_output is None:
+            continue
+        if left_output.needs_clarification or right_output.needs_clarification:
+            continue
+        if left_output.carrier is None or right_output.carrier is None:
+            continue
+        if not _is_bounded_range_endpoint_anchor(left_output.carrier.anchor):
+            continue
+        if not _is_bounded_range_endpoint_anchor(right_output.carrier.anchor):
+            continue
+
+        left_end = max(fragment.end for fragment in left.surface_fragments)
+        right_start = min(fragment.start for fragment in right.surface_fragments)
+        if left_end >= right_start:
+            continue
+        connector = query[left_end:right_start].strip()
+        if connector not in {"到", "至", "-", "~", "～"}:
+            continue
+        raise PostProcessorValidationError(
+            layer=3,
+            stage="post_processor",
+            unit_id=left.unit_id or f"__index_{index}__",
+            details="bounded range must be emitted as one unit rather than split endpoint units",
+        )
+
+
+def _is_bounded_range_endpoint_anchor(anchor: object) -> bool:
+    return isinstance(anchor, (NamedPeriod, DateRange))
 
 
 def _validate_carrier_semantics(unit: StageAUnitOutput, carrier: Carrier, *, unit_id: str) -> None:

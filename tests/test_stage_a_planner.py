@@ -205,3 +205,87 @@ def test_stage_a_prompt_has_no_implicit_anchor_example_for_standalone_relative_p
     assert standalone_relative["units"][0]["content_kind"] == "standalone"
     assert standalone_relative["units"][0]["self_contained_text"] == "去年同期"
     assert standalone_relative["units"][0]["sources"] == []
+
+
+def test_stage_a_prompt_emits_single_unit_for_month_bounded_range() -> None:
+    messages = build_stage_a_messages(
+        query="2025年9月到12月的收益",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    examples = [
+        json.loads(message.content)
+        for index, message in enumerate(messages)
+        if index > 0 and index % 2 == 0
+    ]
+    by_query = {example["query"]: example for example in examples}
+
+    bounded_range = by_query["2025年9月到12月的收益"]
+
+    assert len(bounded_range["units"]) == 1
+    assert bounded_range["units"][0]["render_text"] == "2025年9月到12月"
+    assert bounded_range["units"][0]["self_contained_text"] == "2025年9月到12月"
+
+
+def test_stage_a_prompt_emits_single_unit_for_cross_year_bounded_range() -> None:
+    messages = build_stage_a_messages(
+        query="去年12月到3月的收益",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    examples = [
+        json.loads(message.content)
+        for index, message in enumerate(messages)
+        if index > 0 and index % 2 == 0
+    ]
+    by_query = {example["query"]: example for example in examples}
+
+    bounded_range = by_query["去年12月到3月的收益"]
+
+    assert len(bounded_range["units"]) == 1
+    assert bounded_range["units"][0]["render_text"] == "去年12月到3月"
+    assert bounded_range["units"][0]["self_contained_text"] == "去年12月到3月"
+
+
+def test_stage_a_prompt_keeps_grouped_bounded_range_as_single_unit() -> None:
+    messages = build_stage_a_messages(
+        query="2025年9月到12月的各月份收益",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    examples = [
+        json.loads(message.content)
+        for index, message in enumerate(messages)
+        if index > 0 and index % 2 == 0
+    ]
+    by_query = {example["query"]: example for example in examples}
+
+    grouped_bounded_range = by_query["2025年9月到12月的各月份收益"]
+
+    assert len(grouped_bounded_range["units"]) == 1
+    assert grouped_bounded_range["units"][0]["render_text"] == "2025年9月到12月的各月份"
+    assert grouped_bounded_range["units"][0]["self_contained_text"] == "2025年9月到12月的各月份"
+
+
+def test_stage_a_prompt_keeps_enumeration_separate_from_bounded_range() -> None:
+    messages = build_stage_a_messages(
+        query="2025年9月和12月的收益",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    examples = [
+        json.loads(message.content)
+        for index, message in enumerate(messages)
+        if index > 0 and index % 2 == 0
+    ]
+    by_query = {example["query"]: example for example in examples}
+
+    enumeration = by_query["2025年9月和12月的收益"]
+
+    assert len(enumeration["units"]) == 2
+    assert enumeration["units"][0]["render_text"] == "2025年9月"
+    assert enumeration["units"][1]["render_text"] == "12月"

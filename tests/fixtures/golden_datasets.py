@@ -9,6 +9,7 @@ from time_query_service.post_processor import StageAOutput, StageBOutput
 from time_query_service.resolved_plan import Interval, IntervalTree, ResolvedComparison, ResolvedComparisonPair, ResolvedNode, ResolvedPlan, TreeLabels
 from time_query_service.time_plan import (
     Carrier,
+    CalendarFilter,
     CalendarEvent,
     Comparison,
     ComparisonPair,
@@ -737,6 +738,192 @@ while len(STAGE_A_GOLDEN_CASES) < 30:
         )
     )
 
+STAGE_A_GOLDEN_CASES.extend(
+    [
+        _stage_a_case(
+            "2025年9月到12月收益",
+            [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年9月到12月",
+                    "surface_fragments": [{"start": 0, "end": 11}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年9月到12月",
+                    "sources": [],
+                }
+            ],
+        ),
+        _stage_a_case(
+            "去年12月到3月收益",
+            [
+                {
+                    "unit_id": "u1",
+                    "render_text": "去年12月到3月",
+                    "surface_fragments": [{"start": 0, "end": 8}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "去年12月到3月",
+                    "sources": [],
+                }
+            ],
+        ),
+        _stage_a_case(
+            "2025年Q3到10月收益",
+            [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年Q3到10月",
+                    "surface_fragments": [{"start": 0, "end": 10}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年Q3到10月",
+                    "sources": [],
+                }
+            ],
+        ),
+        _stage_a_case(
+            "2025年1月到3月每个月的每个工作日收益",
+            [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年1月到3月每个月的每个工作日",
+                    "surface_fragments": [{"start": 0, "end": 18}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年1月到3月每个月的每个工作日",
+                    "sources": [],
+                }
+            ],
+        ),
+    ]
+)
+
+STAGE_B_GOLDEN_CASES.extend(
+    [
+        _stage_b_case(
+            "2025年9月到12月",
+            {
+                "carrier": {
+                    "anchor": {
+                        "kind": "mapped_range",
+                        "mode": "bounded_pair",
+                        "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 9},
+                        "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
+                    },
+                    "modifiers": [],
+                },
+                "needs_clarification": False,
+            },
+        ),
+        _stage_b_case(
+            "去年12月到3月",
+            {
+                "carrier": {
+                    "anchor": {
+                        "kind": "mapped_range",
+                        "mode": "bounded_pair",
+                        "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
+                        "end": {"kind": "named_period", "period_type": "month", "year": 2026, "month": 3},
+                    },
+                    "modifiers": [],
+                },
+                "needs_clarification": False,
+            },
+        ),
+        _stage_b_case(
+            "2025年Q3到10月",
+            {
+                "carrier": {
+                    "anchor": {
+                        "kind": "mapped_range",
+                        "mode": "bounded_pair",
+                        "start": {"kind": "named_period", "period_type": "quarter", "year": 2025, "quarter": 3},
+                        "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 10},
+                    },
+                    "modifiers": [],
+                },
+                "needs_clarification": False,
+            },
+        ),
+        _stage_b_case(
+            "2025年1月到3月每个月的每个工作日",
+            {
+                "carrier": {
+                    "anchor": {
+                        "kind": "grouped_temporal_value",
+                        "parent": {
+                            "kind": "mapped_range",
+                            "mode": "bounded_pair",
+                            "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 1},
+                            "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 3},
+                        },
+                        "child_grain": "month",
+                        "selector": "all",
+                    },
+                    "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}],
+                },
+                "needs_clarification": False,
+            },
+        ),
+    ]
+)
+
+LAYER1_GOLDEN_CASES.extend(
+    [
+        _standalone_tree_case(
+            query="2025年9月到12月收益",
+            system_date=date(2026, 4, 17),
+            unit_id="u1",
+            render_text="2025年9月到12月",
+            carrier=Carrier(
+                anchor=MappedRange(
+                    kind="mapped_range",
+                    mode="bounded_pair",
+                    start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9),
+                    end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12),
+                ),
+                modifiers=[],
+            ),
+            tree=_atom_tree(Interval(start=date(2025, 9, 1), end=date(2025, 12, 31), end_inclusive=True)),
+            tier=1,
+            tags=["bounded-range-unit-normalization", "mapped-range-constructors", "append-only-clarification-writer"],
+        ),
+        _standalone_tree_case(
+            query="去年12月到3月收益",
+            system_date=date(2026, 4, 17),
+            unit_id="u1",
+            render_text="去年12月到3月",
+            carrier=Carrier(
+                anchor=MappedRange(
+                    kind="mapped_range",
+                    mode="bounded_pair",
+                    start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12),
+                    end=NamedPeriod(kind="named_period", period_type="month", year=2026, month=3),
+                ),
+                modifiers=[],
+            ),
+            tree=_atom_tree(Interval(start=date(2025, 12, 1), end=date(2026, 3, 31), end_inclusive=True)),
+            tier=1,
+            tags=["bounded-range-unit-normalization", "mapped-range-constructors"],
+        ),
+        _standalone_tree_case(
+            query="2025年Q3到10月收益",
+            system_date=date(2026, 4, 17),
+            unit_id="u1",
+            render_text="2025年Q3到10月",
+            carrier=Carrier(
+                anchor=MappedRange(
+                    kind="mapped_range",
+                    mode="bounded_pair",
+                    start=NamedPeriod(kind="named_period", period_type="quarter", year=2025, quarter=3),
+                    end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=10),
+                ),
+                modifiers=[],
+            ),
+            tree=_atom_tree(Interval(start=date(2025, 7, 1), end=date(2025, 10, 31), end_inclusive=True)),
+            tier=2,
+            tags=["bounded-range-unit-normalization", "mapped-range-constructors"],
+        ),
+    ]
+)
+
 while len(STAGE_B_GOLDEN_CASES) < 50:
     month = len(STAGE_B_GOLDEN_CASES) % 12 + 1
     STAGE_B_GOLDEN_CASES.append(
@@ -753,6 +940,8 @@ while len(STAGE_B_GOLDEN_CASES) < 50:
     )
 
 required_capability_tags = [
+    "bounded-range-unit-normalization",
+    "append-only-clarification-writer",
     "literal-period-expressions",
     "enumeration-values",
     "enumerative-query-semantics",

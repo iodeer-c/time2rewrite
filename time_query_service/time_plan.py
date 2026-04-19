@@ -168,7 +168,7 @@ class MappedRange(StrictModel):
 
 EnumerationMemberAnchor = Annotated[NamedPeriod | DateRange | CalendarEvent, Field(discriminator="kind")]
 GroupedParentAnchor = Annotated[
-    NamedPeriod | DateRange | RelativeWindow | RollingWindow | CalendarEvent, Field(discriminator="kind")
+    NamedPeriod | DateRange | RelativeWindow | RollingWindow | CalendarEvent | MappedRange, Field(discriminator="kind")
 ]
 Anchor = Annotated[
     NamedPeriod

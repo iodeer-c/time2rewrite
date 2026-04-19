@@ -15,10 +15,13 @@ from time_query_service.post_processor import (
     assemble_time_plan,
 )
 from time_query_service.time_plan import (
+    CalendarFilter,
     CalendarEvent,
     Carrier,
     DateRange,
     DerivationSource,
+    GroupedTemporalValue,
+    MappedRange,
     NamedPeriod,
     ScheduleYearRef,
     SurfaceFragment,
@@ -190,6 +193,125 @@ def test_assemble_time_plan_keeps_surface_fragment_mismatch_out_of_append_only_c
 
     assert plan.units[0].render_text == "2025年5月"
     assert plan.units[0].surface_fragments == [SurfaceFragment(start=0, end=7)]
+
+
+def test_assemble_time_plan_rejects_split_month_endpoints_for_bounded_range_query() -> None:
+    stage_a = StageAOutput(
+        query="2025年9月到12月的收益",
+        system_date=date(2026, 4, 17),
+        timezone="Asia/Shanghai",
+        units=[
+            _stage_a_unit(
+                unit_id="u1",
+                render_text="2025年9月",
+                self_contained_text="2025年9月",
+                surface_fragments=[{"start": 0, "end": 7}],
+            ),
+            _stage_a_unit(
+                unit_id="u2",
+                render_text="12月",
+                self_contained_text="2025年12月",
+                surface_fragments=[{"start": 8, "end": 11}],
+            ),
+        ],
+        comparisons=[],
+    )
+    stage_b = {
+        "u1": StageBOutput(
+            carrier=Carrier(anchor=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9), modifiers=[])
+        ),
+        "u2": StageBOutput(
+            carrier=Carrier(anchor=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12), modifiers=[])
+        ),
+    }
+
+    with pytest.raises(PostProcessorValidationError) as excinfo:
+        assemble_time_plan(stage_a, stage_b)
+
+    err = excinfo.value
+    assert err.layer == 3
+    assert err.stage == "post_processor"
+    assert "bounded range" in err.details.lower()
+
+
+def test_assemble_time_plan_keeps_single_bounded_range_unit_canonical_shape() -> None:
+    stage_a = StageAOutput(
+        query="2025年9月到12月的收益",
+        system_date=date(2026, 4, 17),
+        timezone="Asia/Shanghai",
+        units=[
+            _stage_a_unit(
+                unit_id="u1",
+                render_text="2025年9月到12月",
+                self_contained_text="2025年9月到12月",
+                surface_fragments=[{"start": 0, "end": 11}],
+            )
+        ],
+        comparisons=[],
+    )
+    stage_b = {
+        "u1": StageBOutput(
+            carrier=Carrier(
+                anchor=MappedRange(
+                    kind="mapped_range",
+                    mode="bounded_pair",
+                    start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9),
+                    end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12),
+                ),
+                modifiers=[],
+            )
+        )
+    }
+
+    plan = assemble_time_plan(stage_a, stage_b)
+
+    assert len(plan.units) == 1
+    assert plan.units[0].render_text == "2025年9月到12月"
+    assert plan.units[0].content.carrier.anchor.kind == "mapped_range"
+    assert plan.units[0].content.carrier.anchor.mode == "bounded_pair"
+
+
+def test_assemble_time_plan_keeps_grouped_bounded_range_as_one_unit() -> None:
+    stage_a = StageAOutput(
+        query="2025年1月到3月每个月的每个工作日的收益",
+        system_date=date(2026, 4, 17),
+        timezone="Asia/Shanghai",
+        units=[
+            _stage_a_unit(
+                unit_id="u1",
+                render_text="2025年1月到3月每个月的每个工作日",
+                self_contained_text="2025年1月到3月每个月的每个工作日",
+                surface_fragments=[{"start": 0, "end": 18}],
+            )
+        ],
+        comparisons=[],
+    )
+    stage_b = {
+        "u1": StageBOutput(
+            carrier=Carrier(
+                anchor=GroupedTemporalValue(
+                    kind="grouped_temporal_value",
+                    parent=MappedRange(
+                        kind="mapped_range",
+                        mode="bounded_pair",
+                        start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=1),
+                        end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=3),
+                    ),
+                    child_grain="month",
+                    selector="all",
+                ),
+                modifiers=[CalendarFilter(kind="calendar_filter", day_class="workday")],
+            )
+        )
+    }
+
+    plan = assemble_time_plan(stage_a, stage_b)
+
+    assert len(plan.units) == 1
+    assert plan.units[0].render_text == "2025年1月到3月每个月的每个工作日"
+    assert plan.units[0].content.carrier.anchor.kind == "grouped_temporal_value"
+    assert plan.units[0].content.carrier.anchor.parent.kind == "mapped_range"
+    assert plan.units[0].content.carrier.anchor.parent.mode == "bounded_pair"
 
 
 def test_assemble_time_plan_layer4_rejects_dangling_comparison_reference() -> None:

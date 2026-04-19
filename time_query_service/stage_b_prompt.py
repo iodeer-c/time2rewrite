@@ -24,6 +24,12 @@ STAGE_B_SYSTEM_PROMPT = """
 - 节假日事件如果没有显式年份，`schedule_year_ref` 必须直接使用 `{"year": system_date.year}`；不要输出当前实现未支持的 `source_unit_id`
 - `本月至今 / 本季度至今 / 本年至今` 这类 to_date 语义，必须建模为 `mapped_range(mode="period_to_date")`
 - `2025年每天` 这种 day-grain child expansion，保持 `named_period + grain_expansion(day)`，不要改写成 `grouped_temporal_value`
+- 显式 bounded range（例如 `2025年9月到12月`、`去年12月到3月`、`2025年Q3到10月`、`2025年9月到10月15日`）必须输出一个单 carrier，不能拆成两个 standalone endpoint carriers。
+- 如果 bounded range 两端都是显式日级日期，使用 `date_range`。
+- 如果 bounded range 至少一端是自然周期边界，使用 `mapped_range(mode="bounded_pair")`，`start` 和 `end` 必须直接放 canonical endpoint anchors。
+- 对于右边界缺少年份的 bounded range，必须做最小非倒退补全：先继承左边界年份；如果会倒退，再把右边界滚到下一个最小自然周期。例如 `去年12月到3月` 的右边界必须是 `2026年3月`。
+- `mapped_range(mode="bounded_pair")` 在这期只允许自然周期/日级端点；如果端点涉及 `calendar_event`、rolling 或 calendar-class 语义，必须 degrade 为 `unsupported_anchor_semantics`。
+- 如果 bounded range 还带有 grouped / filter scaffold（例如 `2025年1月到3月每个月的每个工作日`），必须先建一个单 bounded-range parent，再把 grouped/filter 语义挂在这个 parent 上；不能先拆成两个端点 carrier。
 """.strip()
 
 
@@ -32,6 +38,87 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
     ({"text": "2025年第一季度", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "named_period", "period_type": "quarter", "year": 2025, "quarter": 1}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "2025年上半年", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "named_period", "period_type": "half_year", "year": 2025, "half": 1}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "2025-03-01到2025-03-10", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "date_range", "start_date": "2025-03-01", "end_date": "2025-03-10", "end_inclusive": True}, "modifiers": []}, "needs_clarification": False}),
+    ({"text": "2025年3月1日到3月10日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "date_range", "start_date": "2025-03-01", "end_date": "2025-03-10", "end_inclusive": True}, "modifiers": []}, "needs_clarification": False}),
+    (
+        {"text": "2025年9月到12月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 9},
+                    "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "去年12月到3月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
+                    "end": {"kind": "named_period", "period_type": "month", "year": 2026, "month": 3},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "2025年Q3到10月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "quarter", "year": 2025, "quarter": 3},
+                    "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 10},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "2025年9月到10月15日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 9},
+                    "end": {"kind": "named_period", "period_type": "day", "year": 2025, "date": "2025-10-15"},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "2025年1月到3月每个月的每个工作日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "grouped_temporal_value",
+                    "parent": {
+                        "kind": "mapped_range",
+                        "mode": "bounded_pair",
+                        "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 1},
+                        "end": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 3},
+                    },
+                    "child_grain": "month",
+                    "selector": "all",
+                },
+                "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
     ({"text": "最近一周", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "week", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一个月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "month", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一季度", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "quarter", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
@@ -54,6 +141,8 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
     ({"text": "最近一个月不含今天", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "截至昨天的最近7天", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "过去3个完整月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "去年9月到国庆假期", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "最近一周到上周五", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "2025年每天", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "named_period", "period_type": "year", "year": 2025}, "modifiers": [{"kind": "grain_expansion", "target_grain": "day"}]}, "needs_clarification": False}),
 ]
 

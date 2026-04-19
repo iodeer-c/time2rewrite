@@ -33,6 +33,9 @@ STAGE_A_SYSTEM_PROMPT = """
 - 如果 query 是“今年3月和5月…”，第二个 unit 的 render_text 必须是“5月”，不是“今年5月”；只有 self_contained_text 才能是“今年5月”。
 - 如果 query 是“2025年中秋假期和国庆假期…”，第二个 unit 的 render_text 必须是“国庆假期”，不是“2025年国庆假期”；只有 self_contained_text 才能是“2025年国庆假期”。
 - 如果 query 是“2025年每个季度…”这类 grouped-temporal 短语，render_text 必须保留完整短语，例如“2025年每个季度”不能漏掉最后的“度”。
+- 如果 query 出现 `A到B / A至B / A-B / A~B / A～B` 这类显式 bounded range，且语义是一个连续区间，不是并列列举，必须输出一个 unit，render_text 覆盖完整区间短语，不能拆成两个端点 unit。
+- 如果显式 bounded range 后面继续带 grouped / filter scaffold，例如“2025年9月到12月的各月份”或“2025年1月到3月每个月的每个工作日”，这些 scaffold 仍属于同一个 bounded-range unit，不能提前拆开。
+- 如果 query 是并列列举，例如“2025年9月和12月…”，必须保持两个独立 unit，绝不能误判成 bounded range。
 - `sources[].source_unit_id` 只能引用本次输出里已经出现过的真实 unit_id，绝不能捏造 `anchor_current_year`、`system_date_anchor` 之类 synthetic anchor。
 - units 必须保持原句从左到右顺序；后面的 clarification writer 只按这个顺序解释时间单元。
 - 如果“去年同期 / 同比 / 环比”在句中有明确前置时间 antecedent，可回指时必须输出 derived；如果 antecedent 有多个并列时间 unit，就必须把全部相关 unit_id 按声明顺序放进 `sources`，绝不能只引用第一个。
@@ -154,6 +157,90 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
                     "self_contained_text": "2025年每个季度",
                     "sources": [],
                 }
+            ],
+            "comparisons": [],
+        },
+    ),
+    (
+        {"query": "2025年9月到12月的收益", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "query": "2025年9月到12月的收益",
+            "system_date": "2026-04-17",
+            "timezone": "Asia/Shanghai",
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年9月到12月",
+                    "surface_fragments": [{"start": 0, "end": 11}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年9月到12月",
+                    "sources": [],
+                }
+            ],
+            "comparisons": [],
+        },
+    ),
+    (
+        {"query": "去年12月到3月的收益", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "query": "去年12月到3月的收益",
+            "system_date": "2026-04-17",
+            "timezone": "Asia/Shanghai",
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "去年12月到3月",
+                    "surface_fragments": [{"start": 0, "end": 8}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "去年12月到3月",
+                    "sources": [],
+                }
+            ],
+            "comparisons": [],
+        },
+    ),
+    (
+        {"query": "2025年9月到12月的各月份收益", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "query": "2025年9月到12月的各月份收益",
+            "system_date": "2026-04-17",
+            "timezone": "Asia/Shanghai",
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年9月到12月的各月份",
+                    "surface_fragments": [{"start": 0, "end": 15}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年9月到12月的各月份",
+                    "sources": [],
+                }
+            ],
+            "comparisons": [],
+        },
+    ),
+    (
+        {"query": "2025年9月和12月的收益", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "query": "2025年9月和12月的收益",
+            "system_date": "2026-04-17",
+            "timezone": "Asia/Shanghai",
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "2025年9月",
+                    "surface_fragments": [{"start": 0, "end": 7}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年9月",
+                    "sources": [],
+                },
+                {
+                    "unit_id": "u2",
+                    "render_text": "12月",
+                    "surface_fragments": [{"start": 8, "end": 11}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "2025年12月",
+                    "sources": [],
+                },
             ],
             "comparisons": [],
         },

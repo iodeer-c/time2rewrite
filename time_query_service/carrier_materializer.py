@@ -277,6 +277,22 @@ def _resolve_expression_intervals(
     return [tree.labels.absolute_core_time]
 
 
+def _validate_bounded_pair_expression(expr: Any) -> None:
+    if expr is None:
+        raise ValueError("mapped_range expression is required")
+    if expr == "system_date":
+        raise NotImplementedError("mapped_range bounded_pair does not support system_date endpoint_set in this change")
+
+    anchor = _coerce_anchor(expr)
+    if isinstance(anchor, (NamedPeriod, DateRange)):
+        return
+    if isinstance(anchor, EnumerationSet):
+        for member in anchor.members:
+            _validate_bounded_pair_expression(member)
+        return
+    raise NotImplementedError(f"mapped_range bounded_pair does not support endpoint type {type(anchor).__name__}")
+
+
 def _coerce_anchor(expr: Any) -> Anchor:
     if isinstance(
         expr,
@@ -323,12 +339,14 @@ def _materialize_mapped_range(
     region: str,
 ) -> IntervalTree:
     if anchor.mode == "bounded_pair":
+        _validate_bounded_pair_expression(anchor.start)
+        _validate_bounded_pair_expression(anchor.end)
         start_intervals = _resolve_expression_intervals(anchor.start, system_date, business_calendar, region)
         end_intervals = _resolve_expression_intervals(anchor.end, system_date, business_calendar, region)
         if len(start_intervals) != len(end_intervals):
             raise ValueError("mapped_range bounded_pair requires equal start/end cardinality")
         ranges = [
-            Interval(start=start.start, end=end.end, end_inclusive=True)
+            _bounded_pair_interval(start, end)
             for start, end in zip(start_intervals, end_intervals, strict=True)
         ]
         return _interval_list_tree(ranges)
@@ -458,6 +476,13 @@ def _shift_interval(interval: Interval, value: int, unit: str) -> Interval:
     start = _shift_grain_forward(interval.start, unit, value)
     end = _shift_grain_forward(interval.end, unit, value)
     return Interval(start=start, end=end, end_inclusive=interval.end_inclusive)
+
+
+def _bounded_pair_interval(start: Interval, end: Interval) -> Interval:
+    normalized_end = end
+    while normalized_end.end < start.start:
+        normalized_end = _shift_interval(normalized_end, 1, "year")
+    return Interval(start=start.start, end=normalized_end.end, end_inclusive=True)
 
 
 def _matches_day_class(status: object, day_class: str) -> bool:

@@ -382,6 +382,89 @@ def test_mapped_range_bounded_pair_materializes_one_range_per_paired_boundary() 
     ]
 
 
+def test_mapped_range_bounded_pair_applies_minimal_non_retreat_for_cross_year_month_range() -> None:
+    tree = materialize_carrier(
+        Carrier(
+            anchor=MappedRange(
+                kind="mapped_range",
+                mode="bounded_pair",
+                start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=12),
+                end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=3),
+            ),
+            modifiers=[],
+        ),
+        system_date=date(2026, 4, 17),
+        business_calendar=_calendar(),
+    )
+
+    assert tree.role == "atom"
+    assert tree.labels.absolute_core_time.start == date(2025, 12, 1)
+    assert tree.labels.absolute_core_time.end == date(2026, 3, 31)
+
+
+def test_mapped_range_bounded_pair_supports_cross_grain_quarter_to_month() -> None:
+    tree = materialize_carrier(
+        Carrier(
+            anchor=MappedRange(
+                kind="mapped_range",
+                mode="bounded_pair",
+                start=NamedPeriod(kind="named_period", period_type="quarter", year=2025, quarter=3),
+                end=NamedPeriod(kind="named_period", period_type="month", year=2025, month=10),
+            ),
+            modifiers=[],
+        ),
+        system_date=date(2026, 4, 17),
+        business_calendar=_calendar(),
+    )
+
+    assert tree.role == "atom"
+    assert tree.labels.absolute_core_time.start == date(2025, 7, 1)
+    assert tree.labels.absolute_core_time.end == date(2025, 10, 31)
+
+
+def test_mapped_range_bounded_pair_supports_month_to_day() -> None:
+    tree = materialize_carrier(
+        Carrier(
+            anchor=MappedRange(
+                kind="mapped_range",
+                mode="bounded_pair",
+                start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9),
+                end=NamedPeriod(kind="named_period", period_type="day", year=2025, date=date(2025, 10, 15)),
+            ),
+            modifiers=[],
+        ),
+        system_date=date(2026, 4, 17),
+        business_calendar=_calendar(),
+    )
+
+    assert tree.role == "atom"
+    assert tree.labels.absolute_core_time.start == date(2025, 9, 1)
+    assert tree.labels.absolute_core_time.end == date(2025, 10, 15)
+
+
+def test_mapped_range_bounded_pair_rejects_unsupported_calendar_event_endpoint() -> None:
+    with pytest.raises(NotImplementedError):
+        materialize_carrier(
+            Carrier(
+                anchor=MappedRange(
+                    kind="mapped_range",
+                    mode="bounded_pair",
+                    start=NamedPeriod(kind="named_period", period_type="month", year=2025, month=9),
+                    end=CalendarEvent(
+                        kind="calendar_event",
+                        region="CN",
+                        event_key="national_day",
+                        schedule_year_ref=ScheduleYearRef(year=2025),
+                        scope="consecutive_rest",
+                    ),
+                ),
+                modifiers=[],
+            ),
+            system_date=date(2026, 4, 17),
+            business_calendar=_calendar(),
+        )
+
+
 def test_mapped_range_period_to_date_materializes_from_system_date() -> None:
     tree = materialize_carrier(
         Carrier(
