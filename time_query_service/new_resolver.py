@@ -70,6 +70,12 @@ def resolve_plan(
             },
             enabled=pipeline_logging_enabled,
         )
+        log_pipeline_event(
+            "resolver",
+            "resolved_node",
+            _resolved_node_payload(unit.unit_id, nodes[unit.unit_id]),
+            enabled=pipeline_logging_enabled,
+        )
 
     comparisons = [_resolve_comparison(comparison, nodes, units_by_id) for comparison in plan.comparisons]
     return ResolvedPlan(nodes=nodes, comparisons=comparisons)
@@ -241,3 +247,40 @@ def _modifier_len_for_unit(unit: Unit) -> int:
 def _is_calendar_data_missing_error(exc: ValueError) -> bool:
     message = str(exc)
     return message.startswith("Missing calendar event span") or message.startswith("Missing business calendar data")
+
+
+def _resolved_node_payload(unit_id: str, node: ResolvedNode) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "unit_id": unit_id,
+        "needs_clarification": node.needs_clarification,
+        "reason_kind": node.reason_kind,
+        "derived_from": [] if node.derived_from is None else list(node.derived_from),
+    }
+    if node.tree is None:
+        payload["tree_role"] = None
+        payload["absolute_core_time"] = None
+        payload["intervals"] = []
+        payload["children_count"] = 0
+        payload["child_absolute_core_times"] = []
+        return payload
+
+    payload["tree_role"] = node.tree.role
+    payload["absolute_core_time"] = _interval_payload(node.tree.labels.absolute_core_time)
+    payload["intervals"] = [_interval_payload(interval) for interval in node.tree.intervals]
+    payload["children_count"] = len(node.tree.children)
+    payload["child_absolute_core_times"] = [
+        _interval_payload(child.labels.absolute_core_time)
+        for child in node.tree.children
+        if child.labels.absolute_core_time is not None
+    ]
+    return payload
+
+
+def _interval_payload(interval: Interval | None) -> dict[str, object] | None:
+    if interval is None:
+        return None
+    return {
+        "start": interval.start.isoformat(),
+        "end": interval.end.isoformat(),
+        "end_inclusive": interval.end_inclusive,
+    }

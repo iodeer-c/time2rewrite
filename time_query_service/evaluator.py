@@ -443,7 +443,9 @@ def clarified_query_completeness(
         if fact.status == "resolved":
             if fact.resolved_text is None or fact.resolved_text not in clarified_query:
                 diffs.append(ComparatorDiff(f"{path}.resolved_text", fact.resolved_text, clarified_query))
-            if fact.grouping_grain is not None:
+            if fact.detail_text is not None and fact.detail_text not in clarified_query:
+                diffs.append(ComparatorDiff(f"{path}.detail_text", fact.detail_text, clarified_query))
+            if fact.grouping_grain is not None and fact.detail_text is None:
                 expected_phrase = _expected_grouping_phrase(fact.grouping_grain)
                 if expected_phrase not in clarified_query:
                     diffs.append(ComparatorDiff(f"{path}.grouping_grain", expected_phrase, clarified_query))
