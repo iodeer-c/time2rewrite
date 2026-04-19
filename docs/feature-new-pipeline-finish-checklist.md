@@ -14,14 +14,16 @@ This branch is implementation-complete enough for review, but not fully closed o
 
 - Worktree: `/tmp/time2rewirte-feature-new-pipeline`
 - Branch: `feature/new-pipeline`
-- Current branch tip equals `feat/append-only-annotation` at the commit level; the new-pipeline implementation currently lives in this worktree as local changes
-- This means the branch is conceptually independent at the time-pipeline layer, but Git history is still sharing the donor-branch base
+- Remote branch: `origin/feature/new-pipeline`
+- Latest local commit: `e57dc56 feat: rebuild the time rewrite pipeline`
+- The branch is conceptually independent at the time-pipeline layer, but Git history still shares the donor-branch base used to bootstrap the shared runtime pieces
 
 ## Ready Artifacts
 
 - Baseline metrics: [feature-new-pipeline-baseline-metrics.md](/tmp/time2rewirte-feature-new-pipeline/docs/feature-new-pipeline-baseline-metrics.md)
 - Manual review: [feature-new-pipeline-manual-review.md](/tmp/time2rewirte-feature-new-pipeline/docs/feature-new-pipeline-manual-review.md)
 - PR description draft: [feature-new-pipeline-pr-description.md](/tmp/time2rewirte-feature-new-pipeline/docs/feature-new-pipeline-pr-description.md)
+- Branch usage: [feature-new-pipeline-branch-usage.md](/tmp/time2rewirte-feature-new-pipeline/docs/feature-new-pipeline-branch-usage.md)
 
 ## Open Process Items
 
@@ -39,5 +41,5 @@ These are the remaining non-local tasks from the OpenSpec checklist:
 
 ## Recommended Next Step
 
-- If staying in discussion mode: use the PR description draft and metrics docs as the stable summary of the current solution.
-- If moving to delivery mode: commit the worktree changes, push `feature/new-pipeline`, and copy the PR description draft into the actual PR body so `10.9` can be closed with evidence.
+- If staying in discussion mode: use the branch-usage doc, PR description draft, and metrics docs as the stable summary of the current solution.
+- If moving to delivery mode later: continue from the already-pushed `feature/new-pipeline` branch and copy the PR description draft into the actual PR body so `10.9` can be closed with evidence.
