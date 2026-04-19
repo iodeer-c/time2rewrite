@@ -79,6 +79,40 @@ def test_run_stage_a_short_circuits_identical_invalid_output() -> None:
     assert len(runner.calls) == 2
 
 
+def test_run_stage_a_accepts_unit_without_surface_fragments() -> None:
+    runner = _FakeRunner(
+        responses=[
+            json.dumps(
+                {
+                    "query": "2025年3月收益",
+                    "system_date": "2026-04-17",
+                    "timezone": "Asia/Shanghai",
+                    "units": [
+                        {
+                            "unit_id": "u1",
+                            "render_text": "2025年3月",
+                            "content_kind": "standalone",
+                            "self_contained_text": "2025年3月",
+                            "sources": [],
+                        }
+                    ],
+                    "comparisons": [],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = run_stage_a(
+        text_runner=runner,
+        query="2025年3月收益",
+        system_date="2026-04-17",
+        timezone="Asia/Shanghai",
+    )
+
+    assert result.units[0].surface_fragments == []
+
+
 def test_stage_a_prompt_keeps_surface_text_for_shared_prefix_enumeration() -> None:
     messages = build_stage_a_messages(
         query="2025年3月和5月收益",

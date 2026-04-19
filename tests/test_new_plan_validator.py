@@ -113,8 +113,8 @@ def test_validate_time_plan_raises_semantic_error_for_overlapping_natural_enumer
     assert "overlap" in str(excinfo.value).lower()
 
 
-def test_validate_time_plan_raises_semantic_error_for_surface_fragment_mismatch() -> None:
-    from time_query_service.new_plan_validator import TimePlanSemanticValidationError, validate_time_plan
+def test_validate_time_plan_ignores_surface_fragment_mismatch_under_append_only_contract() -> None:
+    from time_query_service.new_plan_validator import validate_time_plan
 
     plan = TimePlan(
         query="2025年3月",
@@ -137,10 +137,7 @@ def test_validate_time_plan_raises_semantic_error_for_surface_fragment_mismatch(
         comparisons=[],
     )
 
-    with pytest.raises(TimePlanSemanticValidationError) as excinfo:
-        validate_time_plan(plan)
-
-    assert "surface_fragments" in str(excinfo.value)
+    validate_time_plan(plan)
 
 
 def test_validate_time_plan_raises_semantic_error_for_transient_non_day_grain_expansion() -> None:

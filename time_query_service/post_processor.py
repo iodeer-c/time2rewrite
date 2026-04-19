@@ -49,7 +49,7 @@ SurfaceHint = Literal["calendar_grain_rolling"]
 class StageAUnitOutput(StrictModel):
     unit_id: str | None = None
     render_text: str
-    surface_fragments: list[SurfaceFragment]
+    surface_fragments: list[SurfaceFragment] = Field(default_factory=list)
     content_kind: Literal["standalone", "derived"]
     self_contained_text: str | None = None
     sources: list[DerivationSource] = Field(default_factory=list)
@@ -271,13 +271,6 @@ def _assemble_comparisons(
 
 def _validate_layer3(query: str, units: list[StageAUnitOutput], stage_b: dict[str, StageBOutput]) -> None:
     for index, unit in enumerate(units):
-        if _surface_text(query, unit.surface_fragments) != unit.render_text:
-            raise PostProcessorValidationError(
-                layer=3,
-                stage="post_processor",
-                unit_id=unit.unit_id or f"__index_{index}__",
-                details="surface_fragments do not cover render_text",
-            )
         if unit.content_kind == "standalone":
             stage_b_output = stage_b.get(_stage_b_lookup_key(index, unit))
             if stage_b_output is None:

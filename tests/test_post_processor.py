@@ -21,6 +21,7 @@ from time_query_service.time_plan import (
     DerivationSource,
     NamedPeriod,
     ScheduleYearRef,
+    SurfaceFragment,
 )
 
 
@@ -176,7 +177,7 @@ def test_assemble_time_plan_layer2_attributes_schema_errors_to_stage_and_unit() 
     assert err.unit_id == "u1"
 
 
-def test_assemble_time_plan_layer3_rejects_surface_fragment_mismatch() -> None:
+def test_assemble_time_plan_keeps_surface_fragment_mismatch_out_of_append_only_critical_path() -> None:
     stage_a = StageAOutput(
         query="2025年3月",
         system_date=date(2026, 4, 17),
@@ -185,13 +186,10 @@ def test_assemble_time_plan_layer3_rejects_surface_fragment_mismatch() -> None:
         comparisons=[],
     )
 
-    with pytest.raises(PostProcessorValidationError) as excinfo:
-        assemble_time_plan(stage_a, {"u1": _stage_b_output()})
+    plan = assemble_time_plan(stage_a, {"u1": _stage_b_output()})
 
-    err = excinfo.value
-    assert err.layer == 3
-    assert err.stage == "post_processor"
-    assert err.unit_id == "u1"
+    assert plan.units[0].render_text == "2025年5月"
+    assert plan.units[0].surface_fragments == [SurfaceFragment(start=0, end=7)]
 
 
 def test_assemble_time_plan_layer4_rejects_dangling_comparison_reference() -> None:
@@ -340,12 +338,12 @@ def test_post_processor_emits_validation_event_on_failure(monkeypatch: pytest.Mo
     )
 
     with pytest.raises(PostProcessorValidationError):
-        assemble_time_plan(stage_a, {"u1": _stage_b_output()})
+        assemble_time_plan(stage_a, {})
 
     assert events[-1][0] == "post_processor"
     assert events[-1][1] == "post_processor_validation"
     assert events[-1][2]["outcome"] == "failure"
-    assert events[-1][2]["layer"] == 3
+    assert events[-1][2]["layer"] == 4
 
 
 def test_layer3_rejects_calendar_grain_rolling_approximation() -> None:

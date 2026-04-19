@@ -147,6 +147,72 @@ def test_stage_a_match_reports_surface_hint_mismatch_when_present() -> None:
     assert any(diff.path == "units[u1].surface_hint" for diff in result.diffs)
 
 
+def test_stage_a_match_ignores_surface_fragment_differences() -> None:
+    from time_query_service.evaluator import stage_a_match
+
+    expected = _stage_a_output()
+    actual = StageAOutput.model_validate(
+        {
+            **expected.model_dump(mode="python"),
+            "units": [
+                {
+                    **expected.units[0].model_dump(mode="python"),
+                    "surface_fragments": [],
+                },
+                {
+                    **expected.units[1].model_dump(mode="python"),
+                    "surface_fragments": [],
+                },
+            ],
+        }
+    )
+
+    result = stage_a_match(expected, actual)
+
+    assert not any(diff.path.endswith(".surface_fragments") for diff in result.diffs)
+
+
+def test_stage_a_match_reports_unit_order_mismatch() -> None:
+    from time_query_service.evaluator import stage_a_match
+
+    expected = _stage_a_output()
+    actual = StageAOutput.model_validate(
+        {
+            **expected.model_dump(mode="python"),
+            "units": [
+                expected.units[1].model_dump(mode="python"),
+                expected.units[0].model_dump(mode="python"),
+            ],
+        }
+    )
+
+    result = stage_a_match(expected, actual)
+
+    assert any(diff.path == "units.order" for diff in result.diffs)
+
+
+def test_stage_a_match_reports_self_contained_text_mismatch() -> None:
+    from time_query_service.evaluator import stage_a_match
+
+    expected = _stage_a_output()
+    actual = StageAOutput.model_validate(
+        {
+            **expected.model_dump(mode="python"),
+            "units": [
+                expected.units[0].model_dump(mode="python"),
+                {
+                    **expected.units[1].model_dump(mode="python"),
+                    "self_contained_text": "2024年3月",
+                },
+            ],
+        }
+    )
+
+    result = stage_a_match(expected, actual)
+
+    assert any(diff.path == "units[u2].self_contained_text" for diff in result.diffs)
+
+
 def test_stage_b_match_passes_on_identical_payload() -> None:
     from time_query_service.evaluator import stage_b_match
 
@@ -927,7 +993,15 @@ def test_evaluate_layer1_golden_runs_pipeline_and_summarizes_by_tier() -> None:
     assert report["tier_summary"] == {
         1: {"total_cases": 1, "passed_cases": 1, "failed_cases": 0, "pass_rate": 1.0}
     }
+    assert report["clarified_query_summary"] == {
+        "total_cases": 1,
+        "passed_cases": 1,
+        "failed_cases": 0,
+        "accuracy": 1.0,
+    }
     assert report["results"][0]["passed"] is True
+    assert report["results"][0]["clarified_query"] == "2025年3月收益（2025年3月指2025年3月1日至2025年3月31日）"
+    assert report["results"][0]["clarified_query_validation"]["passed"] is True
 
 
 def test_evaluate_layer1_golden_records_pipeline_exception_as_case_failure() -> None:
@@ -935,18 +1009,19 @@ def test_evaluate_layer1_golden_records_pipeline_exception_as_case_failure() -> 
 
     expected_stage_a = StageAOutput.model_validate(
         {
-            "query": "2025年3月收益",
+            "query": "最近5个工作日收益",
             "system_date": "2026-04-17",
             "timezone": "Asia/Shanghai",
-                "units": [
-                    {
-                        "unit_id": "u1",
-                        "render_text": "2025年3月",
-                        "surface_fragments": [{"start": 0, "end": 9}],
-                        "content_kind": "standalone",
-                        "self_contained_text": "2025年3月",
-                        "sources": [],
-                    }
+            "units": [
+                {
+                    "unit_id": "u1",
+                    "render_text": "最近5个工作日",
+                    "surface_fragments": [{"start": 0, "end": 7}],
+                    "content_kind": "standalone",
+                    "self_contained_text": "最近5个工作日",
+                    "sources": [],
+                    "surface_hint": "calendar_grain_rolling",
+                }
             ],
             "comparisons": [],
         }
@@ -954,30 +1029,28 @@ def test_evaluate_layer1_golden_records_pipeline_exception_as_case_failure() -> 
     expected_stage_b = StageBOutput.model_validate(
         {
             "carrier": {
-                "anchor": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 3},
-                "modifiers": [],
+                "anchor": {"kind": "rolling_window", "length": 5, "unit": "day", "endpoint": "today", "include_endpoint": True},
+                "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}],
             },
             "needs_clarification": False,
         }
     )
-    interval = Interval(start=date(2025, 3, 1), end=date(2025, 3, 31), end_inclusive=True)
     layer1_case = {
-        "query": "2025年3月收益",
+        "query": "最近5个工作日收益",
         "system_date": "2026-04-17",
         "tier": 1,
         "expected_time_plan": TimePlan(
-            query="2025年3月收益",
+            query="最近5个工作日收益",
             system_date=date(2026, 4, 17),
             timezone="Asia/Shanghai",
             units=[
                 Unit(
                     unit_id="u1",
-                    render_text="2025年3月",
+                    render_text="最近5个工作日",
                     surface_fragments=[{"start": 0, "end": 7}],
-                    content=StandaloneContent(
-                        content_kind="standalone",
-                        carrier=Carrier(anchor=NamedPeriod(kind="named_period", period_type="month", year=2025, month=3), modifiers=[]),
-                    ),
+                    needs_clarification=True,
+                    reason_kind="unsupported_calendar_grain_rolling",
+                    content=StandaloneContent(content_kind="standalone", carrier=None),
                 )
             ],
             comparisons=[],
@@ -986,7 +1059,8 @@ def test_evaluate_layer1_golden_records_pipeline_exception_as_case_failure() -> 
             (
                 "u1",
                 ResolvedNode(
-                    tree=IntervalTree(role="atom", intervals=[interval], children=[], labels=TreeLabels(absolute_core_time=interval)),
+                    needs_clarification=True,
+                    reason_kind="unsupported_calendar_grain_rolling",
                     derived_from=[],
                 ),
             )
@@ -1008,9 +1082,39 @@ def test_evaluate_layer1_golden_records_pipeline_exception_as_case_failure() -> 
     assert report["tier_summary"] == {
         1: {"total_cases": 1, "passed_cases": 0, "failed_cases": 1, "pass_rate": 0.0}
     }
+    assert report["clarified_query_summary"] == {
+        "total_cases": 0,
+        "passed_cases": 0,
+        "failed_cases": 0,
+        "accuracy": 0.0,
+    }
     assert report["results"][0]["passed"] is False
     assert report["results"][0]["actual_time_plan"] is None
+    assert report["results"][0]["clarified_query"] is None
+    assert report["results"][0]["clarified_query_validation"] is None
     assert any(diff["path"] == "pipeline.execution" for diff in report["results"][0]["diffs"])
+
+
+def test_clarified_query_completeness_reports_missing_resolved_text() -> None:
+    from time_query_service.clarification_writer import ClarificationFact
+    from time_query_service.evaluator import clarified_query_completeness
+
+    result = clarified_query_completeness(
+        original_query="最近一个月每周的收益是多少",
+        clarification_facts=[
+            ClarificationFact(
+                unit_id="u1",
+                label="最近一个月每周",
+                status="resolved",
+                resolved_text="2026年3月18日至2026年4月17日",
+                grouping_grain="week",
+            )
+        ],
+        clarified_query="最近一个月每周的收益是多少（最近一个月每周指2026年3月18日至2026年4月17日）",
+    )
+
+    assert not result.passed
+    assert any(diff.path.endswith(".grouping_grain") for diff in result.diffs)
 
 
 def test_build_cutover_gate_summary_applies_contract_thresholds() -> None:

@@ -104,9 +104,11 @@ def test_query_pipeline_service_runs_new_pipeline_end_to_end() -> None:
         rewrite=True,
     )
 
+    assert response["original_query"] == "2025年3月收益"
     assert response["clarification_plan"]["units"][0]["unit_id"] == "u1"
     assert response["clarification_items"][0]["unit_id"] == "u1"
-    assert response["rewritten_query"] == "2025年3月（2025年3月1日至2025年3月31日）收益"
+    assert response["clarified_query"] == "2025年3月收益（2025年3月指2025年3月1日至2025年3月31日）"
+    assert response["rewritten_query"] == response["clarified_query"]
 
 
 def test_query_pipeline_service_surfaces_degraded_slot_without_failing_whole_response() -> None:
@@ -126,4 +128,5 @@ def test_query_pipeline_service_surfaces_degraded_slot_without_failing_whole_res
 
     assert response["clarification_plan"]["units"][0]["needs_clarification"] is True
     assert response["clarification_plan"]["units"][0]["reason_kind"] == "unsupported_calendar_grain_rolling"
-    assert response["rewritten_query"] is None
+    assert response["clarified_query"] == "最近5个休息日收益（最近5个休息日当前无法确定）"
+    assert response["rewritten_query"] == response["clarified_query"]

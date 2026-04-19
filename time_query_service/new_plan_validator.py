@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from time_query_service.post_processor import (
     PostProcessorValidationError,
-    _surface_text,
     _validate_carrier_semantics,
     _validate_layer4,
 )
@@ -45,13 +44,6 @@ def validate_time_plan(plan: TimePlan) -> None:
 
 def _validate_semantics(plan: TimePlan) -> None:
     for unit in plan.units:
-        if _surface_text(plan.query, unit.surface_fragments) != unit.render_text:
-            raise PostProcessorValidationError(
-                layer=3,
-                stage="new_plan_validator",
-                unit_id=unit.unit_id,
-                details="surface_fragments do not cover render_text",
-            )
         if unit.content.content_kind == "standalone":
             if not unit.needs_clarification and unit.content.carrier is None:
                 raise PostProcessorValidationError(
@@ -83,4 +75,3 @@ def _reject_transient_non_day_grain_expansion(unit) -> None:
             unit_id=unit.unit_id,
             details="final TimePlan MUST NOT retain non-day GrainExpansion; canonicalize to GroupedTemporalValue first",
         )
-

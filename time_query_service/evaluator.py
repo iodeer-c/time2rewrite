@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.business_calendar import JsonBusinessCalendar
+from time_query_service.clarification_writer import ClarificationFact, build_clarification_facts, render_clarified_query
 from time_query_service.config import get_business_calendar_root
 from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
 from time_query_service.post_processor import (
@@ -126,10 +127,14 @@ def evaluate_layer1_golden(
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     tier_buckets: dict[int, list[bool]] = {}
+    clarified_query_outcomes: list[bool] = []
 
     for case in cases:
         time_plan = None
         resolved_plan = None
+        clarification_facts: list[ClarificationFact] | None = None
+        clarified_query: str | None = None
+        clarified_query_validation: ComparatorResult | None = None
         try:
             stage_a = run_stage_a(
                 text_runner=stage_a_runner,
@@ -167,6 +172,20 @@ def evaluate_layer1_golden(
                 business_calendar=business_calendar,
                 pipeline_logging_enabled=pipeline_logging_enabled,
             )
+            clarification_facts = build_clarification_facts(
+                original_query=case["query"],
+                time_plan=time_plan,
+                resolved_plan=resolved_plan,
+            )
+            clarified_query = render_clarified_query(
+                original_query=case["query"],
+                clarification_facts=clarification_facts,
+            )
+            clarified_query_validation = clarified_query_completeness(
+                original_query=case["query"],
+                clarification_facts=clarification_facts,
+                clarified_query=clarified_query,
+            )
         except Exception as exc:  # noqa: BLE001 - evaluation should record case failure and continue
             comparison = ComparatorResult(
                 diffs=[
@@ -181,6 +200,8 @@ def evaluate_layer1_golden(
             comparison = resolved_plan_equals(case["expected_resolved_plan"], resolved_plan)
         passed = case_passes(comparison)
         tier_buckets.setdefault(case["tier"], []).append(passed)
+        if clarified_query_validation is not None:
+            clarified_query_outcomes.append(clarified_query_validation.passed)
         results.append(
             {
                 "query": case["query"],
@@ -189,6 +210,16 @@ def evaluate_layer1_golden(
                 "diffs": _serialize_diffs(comparison.diffs),
                 "actual_time_plan": time_plan.model_dump(mode="python") if time_plan is not None else None,
                 "actual_resolved_plan": resolved_plan.model_dump(mode="python") if resolved_plan is not None else None,
+                "clarification_items": None
+                if clarification_facts is None
+                else [fact.model_dump(mode="python") for fact in clarification_facts],
+                "clarified_query": clarified_query,
+                "clarified_query_validation": None
+                if clarified_query_validation is None
+                else {
+                    "passed": clarified_query_validation.passed,
+                    "diffs": _serialize_diffs(clarified_query_validation.diffs),
+                },
             }
         )
 
@@ -201,6 +232,16 @@ def evaluate_layer1_golden(
             "pass_rate": (sum(1 for outcome in outcomes if outcome) / len(outcomes)) if outcomes else 0.0,
         }
         for tier, outcomes in sorted(tier_buckets.items())
+    }
+    report["clarified_query_summary"] = {
+        "total_cases": len(clarified_query_outcomes),
+        "passed_cases": sum(1 for outcome in clarified_query_outcomes if outcome),
+        "failed_cases": sum(1 for outcome in clarified_query_outcomes if not outcome),
+        "accuracy": (
+            sum(1 for outcome in clarified_query_outcomes if outcome) / len(clarified_query_outcomes)
+            if clarified_query_outcomes
+            else 0.0
+        ),
     }
     return report
 
@@ -251,6 +292,11 @@ def stage_a_match(
 
     if len(expected_payload.units) != len(actual_payload.units):
         diffs.append(ComparatorDiff("units", len(expected_payload.units), len(actual_payload.units)))
+
+    expected_order = [unit.unit_id or f"__index_{index}__" for index, unit in enumerate(expected_payload.units)]
+    actual_order = [unit.unit_id or f"__index_{index}__" for index, unit in enumerate(actual_payload.units)]
+    if expected_order != actual_order:
+        diffs.append(ComparatorDiff("units.order", expected_order, actual_order))
 
     expected_units = {unit.unit_id or f"__index_{index}__": unit for index, unit in enumerate(expected_payload.units)}
     actual_units = {unit.unit_id or f"__index_{index}__": unit for index, unit in enumerate(actual_payload.units)}
@@ -358,6 +404,32 @@ def resolved_plan_equals(expected: ResolvedPlan, actual: ResolvedPlan) -> Compar
     return ComparatorResult(diffs=diffs)
 
 
+def clarified_query_completeness(
+    *,
+    original_query: str,
+    clarification_facts: list[ClarificationFact],
+    clarified_query: str,
+) -> ComparatorResult:
+    diffs: list[ComparatorDiff] = []
+    if not clarified_query.startswith(original_query):
+        diffs.append(ComparatorDiff("clarified_query.prefix", original_query, clarified_query))
+
+    for index, fact in enumerate(clarification_facts):
+        path = f"clarification_facts[{index}]"
+        if fact.label not in clarified_query:
+            diffs.append(ComparatorDiff(f"{path}.label", fact.label, clarified_query))
+        if fact.status == "resolved":
+            if fact.resolved_text is None or fact.resolved_text not in clarified_query:
+                diffs.append(ComparatorDiff(f"{path}.resolved_text", fact.resolved_text, clarified_query))
+            if fact.grouping_grain is not None:
+                expected_phrase = _expected_grouping_phrase(fact.grouping_grain)
+                if expected_phrase not in clarified_query:
+                    diffs.append(ComparatorDiff(f"{path}.grouping_grain", expected_phrase, clarified_query))
+        elif "无法确定" not in clarified_query:
+            diffs.append(ComparatorDiff(f"{path}.status", "无法确定", clarified_query))
+    return ComparatorResult(diffs=diffs)
+
+
 def lint_layer1_case(case: dict[str, Any]) -> None:
     expected_time_plan = case.get("expected_time_plan")
     if expected_time_plan is None:
@@ -421,14 +493,8 @@ def _compare_stage_a_unit(
         diffs.append(ComparatorDiff(f"{path}.content_kind", expected.content_kind, actual.content_kind))
     if expected.render_text != actual.render_text:
         diffs.append(ComparatorDiff(f"{path}.render_text", expected.render_text, actual.render_text))
-    if expected.surface_fragments != actual.surface_fragments:
-        diffs.append(
-            ComparatorDiff(
-                f"{path}.surface_fragments",
-                [fragment.model_dump(mode="python") for fragment in expected.surface_fragments],
-                [fragment.model_dump(mode="python") for fragment in actual.surface_fragments],
-            )
-        )
+    if expected.self_contained_text != actual.self_contained_text:
+        diffs.append(ComparatorDiff(f"{path}.self_contained_text", expected.self_contained_text, actual.self_contained_text))
     if expected.surface_hint != actual.surface_hint:
         diffs.append(ComparatorDiff(f"{path}.surface_hint", expected.surface_hint, actual.surface_hint))
 
@@ -639,6 +705,18 @@ def _evaluation_report(results: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "results": results,
     }
+
+
+def _expected_grouping_phrase(grain: str) -> str:
+    mapping = {
+        "day": "自然日",
+        "week": "自然周",
+        "month": "自然月",
+        "quarter": "自然季度",
+        "half_year": "自然半年",
+        "year": "自然年",
+    }
+    return mapping.get(grain, grain)
 
 
 def _create_optional_role_llm(runtime_config: LLMRuntimeConfig, *roles: str) -> Any | None:

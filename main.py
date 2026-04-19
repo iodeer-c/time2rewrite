@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from time_query_service.business_calendar import JsonBusinessCalendar
 from time_query_service.config import get_business_calendar_root
+from time_query_service.post_processor import PostProcessorValidationError
 from time_query_service.service import QueryPipelineService
 
 app = FastAPI(title="Time Query Service")
@@ -49,5 +50,7 @@ def pipeline_query(request: PipelineRequest) -> dict:
             timezone=request.timezone,
             rewrite=request.rewrite,
         )
+    except PostProcessorValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

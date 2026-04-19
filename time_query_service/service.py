@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from time_query_service.business_calendar import BusinessCalendarPort
+from time_query_service.clarification_writer import build_clarification_facts, render_clarified_query
 from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
 from time_query_service.pipeline_logging import log_pipeline_event
 from time_query_service.post_processor import StageAOutput, assemble_time_plan
-from time_query_service.rewriter import build_rewriter_payload, rewrite_query
 from time_query_service.stage_a_planner import run_stage_a
 from time_query_service.stage_b_planner import StageBRequest, run_stage_b_batch
 from time_query_service.new_resolver import resolve_plan
@@ -122,8 +122,10 @@ class QueryPipelineService:
             if not rewrite:
                 raise
             response = {
+                "original_query": query,
                 "clarification_plan": None,
                 "clarification_items": [],
+                "clarified_query": None,
                 "rewritten_query": None,
             }
             log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)
@@ -150,23 +152,27 @@ class QueryPipelineService:
             pipeline_logging_enabled=pipeline_logging_enabled,
         )
 
+        clarification_items = build_clarification_facts(
+            original_query=query,
+            time_plan=time_plan,
+            resolved_plan=resolved_plan,
+        )
         if rewrite:
-            rewritten_query = rewrite_query(
+            clarified_query = render_clarified_query(
                 original_query=query,
-                time_plan=time_plan,
-                resolved_plan=resolved_plan,
+                clarification_facts=clarification_items,
                 text_runner=self.rewriter_runner,
             )
+            rewritten_query = clarified_query
         else:
+            clarified_query = None
             rewritten_query = None
 
         response = {
+            "original_query": query,
             "clarification_plan": time_plan.model_dump(mode="python"),
-            "clarification_items": build_rewriter_payload(
-                original_query=query,
-                time_plan=time_plan,
-                resolved_plan=resolved_plan,
-            )["bindings"],
+            "clarification_items": [item.model_dump(mode="python") for item in clarification_items],
+            "clarified_query": clarified_query,
             "rewritten_query": rewritten_query,
         }
         log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)

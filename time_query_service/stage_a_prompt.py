@@ -18,7 +18,7 @@ STAGE_A_SYSTEM_PROMPT = """
 
 你只负责：
 - 按原句切分时间 unit
-- 为每个 unit 给出 render_text、surface_fragments、content_kind、self_contained_text
+- 为每个 unit 给出 render_text、content_kind、self_contained_text
 - 对 derived unit 给出 sources
 - 对 comparison 给出 pair 关系
 - 对 calendar-class rolling phrase 给出 surface_hint = "calendar_grain_rolling"
@@ -32,12 +32,14 @@ STAGE_A_SYSTEM_PROMPT = """
 - 如果 query 是“2025年3月和5月…”，第二个 unit 的 render_text 必须是“5月”，不是“2025年5月”；只有 self_contained_text 才能是“2025年5月”。
 - 如果 query 是“今年3月和5月…”，第二个 unit 的 render_text 必须是“5月”，不是“今年5月”；只有 self_contained_text 才能是“今年5月”。
 - 如果 query 是“2025年中秋假期和国庆假期…”，第二个 unit 的 render_text 必须是“国庆假期”，不是“2025年国庆假期”；只有 self_contained_text 才能是“2025年国庆假期”。
-- 如果 query 是“2025年每个季度…”这类 grouped-temporal 短语，render_text 必须保留完整短语，surface_fragments 也必须覆盖到最后一个 grain 字；例如“2025年每个季度”必须覆盖 [0, 9)，不能漏掉最后的“度”。
+- 如果 query 是“2025年每个季度…”这类 grouped-temporal 短语，render_text 必须保留完整短语，例如“2025年每个季度”不能漏掉最后的“度”。
 - `sources[].source_unit_id` 只能引用本次输出里已经出现过的真实 unit_id，绝不能捏造 `anchor_current_year`、`system_date_anchor` 之类 synthetic anchor。
+- units 必须保持原句从左到右顺序；后面的 clarification writer 只按这个顺序解释时间单元。
 - 如果“去年同期 / 同比 / 环比”在句中有明确前置时间 antecedent，可回指时必须输出 derived；如果 antecedent 有多个并列时间 unit，就必须把全部相关 unit_id 按声明顺序放进 `sources`，绝不能只引用第一个。
 - 只有当“去年同期 / 同比 / 环比”在句中完全没有明确前置时间 antecedent 可回指时，才不要输出 derived；此时应把它当 standalone unit 留给 Stage B / downstream 决定是否能结构化。
-- surface_fragments 必须只覆盖 render_text 在原句中的真实位置，不能指向扩写后的假想跨度。
-- surface_fragments 使用半开区间 [start, end)，必须精确覆盖 render_text，不能把后面的“收益 / 对比 / ，”等非时间字符卷进去。
+- surface_fragments 如果提供，只能作为原句表面位置的可选 hint，不能指向扩写后的假想跨度。
+- surface_fragments 如果提供，使用半开区间 [start, end)，必须精确覆盖 render_text，不能把后面的“收益 / 对比 / ，”等非时间字符卷进去。
+- 如果你不能稳定给出正确的 surface_fragments，就省略这个字段，不要猜。
 - surface_hint = "calendar_grain_rolling" 只允许用于“最近N个工作日 / 节假日 / 周末 / 补班日”这类 calendar-class count rolling；普通 rolling（最近7天 / 最近一周 / 最近一个月 / 最近一季度 / 最近半年 / 最近一年）绝不能带这个 hint。
 """.strip()
 

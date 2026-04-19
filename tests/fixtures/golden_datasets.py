@@ -1301,3 +1301,27 @@ while sum(1 for case in LAYER1_GOLDEN_CASES if case["tier"] == 2) < 30:
             tags=[required_capability_tags[len(LAYER1_GOLDEN_CASES) % len(required_capability_tags)]],
         )
     )
+
+
+APPEND_ONLY_MANUAL_REVIEW_CASES = [
+    {
+        "query": "2025年3月收益",
+        "review_focus": "single resolved unit is appended without paraphrasing the business wording",
+    },
+    {
+        "query": "最近一个月每周的收益是多少",
+        "review_focus": "clarified_query preserves grouped weekly result shape and names the natural-week bucketing basis",
+    },
+    {
+        "query": "今年3月和去年同期的收益分别是多少",
+        "review_focus": "comparison ordering stays left-to-right and both resolved ranges are explained at the sentence tail",
+    },
+    {
+        "query": "最近5个休息日收益是多少",
+        "review_focus": "unsupported calendar-class count rolling stays explicit rather than disappearing from the clarification tail",
+    },
+    {
+        "query": "2025年中秋假期和国庆假期一起的收益是多少",
+        "review_focus": "overlapping holiday-event members remain distinct clarification slots without rewriting the aggregate wording",
+    },
+]
