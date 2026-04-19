@@ -1,70 +1,44 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from time_query_service.annotation import AppendOnlyAnnotationRenderer
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
-from time_query_service.materialized_rewrite import render_materialized_query
-from time_query_service.plan_semantic_normalizer import NormalizationError, normalize_plan
 from time_query_service.pipeline_logging import log_pipeline_event
-from time_query_service.planner import ClarificationPlanner
-from time_query_service.time_resolver import resolve_materialization_context, resolve_plan
-
-
-ResolverCallable = Callable[..., Any]
+from time_query_service.post_processor import StageAOutput, assemble_time_plan
+from time_query_service.rewriter import build_rewriter_payload, rewrite_query
+from time_query_service.stage_a_planner import run_stage_a
+from time_query_service.stage_b_planner import StageBRequest, run_stage_b_batch
+from time_query_service.new_resolver import resolve_plan
 
 
 class QueryPipelineService:
     def __init__(
         self,
         *,
-        planner: Any | None = None,
-        resolver: ResolverCallable | None = None,
-        annotator: Any | None = None,
+        stage_a_runner: Any | None = None,
+        stage_b_runner: Any | None = None,
+        rewriter_runner: Any | None = None,
         business_calendar: BusinessCalendarPort | None = None,
         llm_runtime_config: LLMRuntimeConfig | None = None,
         llm_config_path: Path | None = None,
         pipeline_logging_enabled: bool | None = None,
+        max_stage_b_concurrent: int = 10,
     ) -> None:
-        self._planner = planner
-        self._resolver = resolver
-        self._annotator = annotator
+        self._stage_a_runner = stage_a_runner
+        self._stage_b_runner = stage_b_runner
+        self._rewriter_runner = rewriter_runner
         self._business_calendar = business_calendar
         self._llm_runtime_config = llm_runtime_config
         self._llm_config_path = llm_config_path
         self._pipeline_logging_enabled = pipeline_logging_enabled
-
-    @property
-    def planner(self) -> Any:
-        if self._planner is None:
-            self._planner = ClarificationPlanner(
-                text_runner=self._create_role_llm("planner"),
-                pipeline_logging_enabled=self._is_pipeline_logging_enabled(),
-            )
-        return self._planner
-
-    @property
-    def annotator(self) -> Any:
-        if self._annotator is None:
-            self._annotator = AppendOnlyAnnotationRenderer(
-                text_runner=self._create_optional_role_llm("annotator", "fallback")
-            )
-        return self._annotator
-
-    @property
-    def resolver(self) -> ResolverCallable:
-        return self._resolver or resolve_plan
+        self._max_stage_b_concurrent = max_stage_b_concurrent
 
     def _get_llm_runtime_config(self) -> LLMRuntimeConfig:
         if self._llm_runtime_config is None:
             self._llm_runtime_config = load_llm_runtime_config(config_path=self._llm_config_path)
         return self._llm_runtime_config
-
-    def _create_role_llm(self, role: str) -> Any:
-        config = self._get_llm_runtime_config().get_role_config(role)
-        return LLMFactory.create_llm(config)
 
     def _create_optional_role_llm(self, *roles: str) -> Any | None:
         try:
@@ -77,6 +51,28 @@ class QueryPipelineService:
                 continue
             return LLMFactory.create_llm(config)
         return None
+
+    @property
+    def stage_a_runner(self) -> Any:
+        if self._stage_a_runner is None:
+            self._stage_a_runner = self._create_optional_role_llm("stage_a", "planner")
+        if self._stage_a_runner is None:
+            raise RuntimeError("Stage A runner is not configured")
+        return self._stage_a_runner
+
+    @property
+    def stage_b_runner(self) -> Any:
+        if self._stage_b_runner is None:
+            self._stage_b_runner = self._create_optional_role_llm("stage_b", "planner")
+        if self._stage_b_runner is None:
+            raise RuntimeError("Stage B runner is not configured")
+        return self._stage_b_runner
+
+    @property
+    def rewriter_runner(self) -> Any | None:
+        if self._rewriter_runner is None:
+            self._rewriter_runner = self._create_optional_role_llm("rewriter", "annotator", "fallback")
+        return self._rewriter_runner
 
     def _is_pipeline_logging_enabled(self) -> bool:
         if self._pipeline_logging_enabled is not None:
@@ -95,6 +91,11 @@ class QueryPipelineService:
         timezone: str = "Asia/Shanghai",
         rewrite: bool = False,
     ) -> dict[str, Any]:
+        if self._business_calendar is None:
+            raise ValueError("business_calendar is required for the new pipeline")
+        if system_date is None:
+            raise ValueError("system_date is required for the new pipeline")
+
         pipeline_logging_enabled = self._is_pipeline_logging_enabled()
         log_pipeline_event(
             "service",
@@ -108,21 +109,16 @@ class QueryPipelineService:
             },
             enabled=pipeline_logging_enabled,
         )
+
         try:
-            plan = self.planner.plan_query(
-                original_query=query,
+            stage_a = run_stage_a(
+                text_runner=self.stage_a_runner,
+                query=query,
                 system_date=system_date,
-                system_datetime=system_datetime,
                 timezone=timezone,
+                pipeline_logging_enabled=pipeline_logging_enabled,
             )
         except ValueError as exc:
-            log_pipeline_event(
-                "planner",
-                "failure",
-                str(exc),
-                level=40,
-                enabled=pipeline_logging_enabled,
-            )
             if not rewrite:
                 raise
             response = {
@@ -130,219 +126,63 @@ class QueryPipelineService:
                 "clarification_items": [],
                 "rewritten_query": None,
             }
-            log_pipeline_event(
-                "service",
-                "response",
-                response,
-                enabled=pipeline_logging_enabled,
-            )
+            log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)
             return response
 
-        log_pipeline_event(
-            "planner",
-            "validated_plan",
-            plan.model_dump(mode="python"),
-            enabled=pipeline_logging_enabled,
+        stage_b_requests = self._stage_b_requests(stage_a)
+        stage_b_outputs = run_stage_b_batch(
+            text_runner=self.stage_b_runner,
+            requests=stage_b_requests,
+            system_date=system_date,
+            timezone=timezone,
+            max_concurrent=self._max_stage_b_concurrent,
+            pipeline_logging_enabled=pipeline_logging_enabled,
+        )
+        stage_b_by_unit = {
+            request.unit_id: output
+            for request, output in zip(stage_b_requests, stage_b_outputs, strict=True)
+        }
+
+        time_plan = assemble_time_plan(stage_a, stage_b_by_unit)
+        resolved_plan = resolve_plan(
+            time_plan,
+            business_calendar=self._business_calendar,
+            pipeline_logging_enabled=pipeline_logging_enabled,
         )
 
-        try:
-            log_pipeline_event(
-                "normalizer",
-                "request",
-                {
-                    "clarification_plan": plan.model_dump(mode="python"),
-                },
-                enabled=pipeline_logging_enabled,
+        if rewrite:
+            rewritten_query = rewrite_query(
+                original_query=query,
+                time_plan=time_plan,
+                resolved_plan=resolved_plan,
+                text_runner=self.rewriter_runner,
             )
-            normalized_plan = normalize_plan(plan)
-        except NormalizationError as exc:
-            log_pipeline_event(
-                "normalizer",
-                "failure",
-                str(exc),
-                level=40,
-                enabled=pipeline_logging_enabled,
-            )
-            if not rewrite:
-                raise
-            response = {
-                "clarification_plan": plan.model_dump(mode="python"),
-                "clarification_items": [],
-                "rewritten_query": None,
-            }
-            log_pipeline_event(
-                "service",
-                "response",
-                response,
-                enabled=pipeline_logging_enabled,
-            )
-            return response
-        log_pipeline_event(
-            "normalizer",
-            "result",
-            normalized_plan.model_dump(mode="python"),
-            enabled=pipeline_logging_enabled,
-        )
-
-        try:
-            log_pipeline_event(
-                "resolver",
-                "request",
-                {
-                    "clarification_plan": plan.model_dump(mode="python"),
-                    "normalized_plan": normalized_plan.model_dump(mode="python"),
-                    "system_date": system_date,
-                    "system_datetime": system_datetime,
-                    "timezone": timezone,
-                },
-                enabled=pipeline_logging_enabled,
-            )
-            resolution = self.resolver(
-                plan=normalized_plan,
-                system_date=system_date,
-                system_datetime=system_datetime,
-                timezone=timezone,
-                business_calendar=self._business_calendar,
-            )
-        except ValueError as exc:
-            log_pipeline_event(
-                "resolver",
-                "failure",
-                str(exc),
-                level=40,
-                enabled=pipeline_logging_enabled,
-            )
-            if not rewrite:
-                raise
-            response = {
-                "clarification_plan": plan.model_dump(mode="python"),
-                "clarification_items": [],
-                "rewritten_query": None,
-            }
-            log_pipeline_event(
-                "service",
-                "response",
-                response,
-                enabled=pipeline_logging_enabled,
-            )
-            return response
-        log_pipeline_event(
-            "resolver",
-            "result",
-            {
-                "clarification_items": [
-                    item.model_dump(mode="python") for item in resolution.items
-                ]
-            },
-            enabled=pipeline_logging_enabled,
-        )
-        if not rewrite:
-            rewritten_query = None
-        elif not resolution.items:
-            rewritten_query = query
         else:
-            try:
-                log_pipeline_event(
-                    "materializer",
-                    "request",
-                    {
-                        "original_query": query,
-                        "clarification_plan": plan.model_dump(mode="python"),
-                        "normalized_plan": normalized_plan.model_dump(mode="python"),
-                        "comparison_groups": [
-                            group.model_dump(mode="python") for group in plan.comparison_groups
-                        ],
-                    },
-                    enabled=pipeline_logging_enabled,
-                )
-                materialization_context = resolve_materialization_context(
-                    plan=normalized_plan,
-                    system_date=system_date,
-                    system_datetime=system_datetime,
-                    timezone=timezone,
-                    business_calendar=self._business_calendar,
-                )
-            except ValueError as exc:
-                log_pipeline_event(
-                    "materializer",
-                    "failure",
-                    str(exc),
-                    level=40,
-                    enabled=pipeline_logging_enabled,
-                )
-                rewritten_query = None
-            else:
-                if materialization_context is not None:
-                    try:
-                        rewritten_query = render_materialized_query(
-                            original_query=query,
-                            context=materialization_context,
-                        )
-                    except ValueError as exc:
-                        log_pipeline_event(
-                            "materializer",
-                            "failure",
-                            str(exc),
-                            level=40,
-                            enabled=pipeline_logging_enabled,
-                        )
-                        rewritten_query = None
-                    else:
-                        log_pipeline_event(
-                            "materializer",
-                            "result",
-                            {
-                                "rewritten_query": rewritten_query,
-                                "context": materialization_context.model_dump(mode="python"),
-                            },
-                            enabled=pipeline_logging_enabled,
-                        )
-                else:
-                    try:
-                        log_pipeline_event(
-                            "annotator",
-                            "request",
-                            {
-                                "original_query": query,
-                                "clarification_items": [
-                                    item.model_dump(mode="python") for item in resolution.items
-                                ],
-                                "comparison_groups": [
-                                    group.model_dump(mode="python") for group in plan.comparison_groups
-                                ],
-                            },
-                            enabled=pipeline_logging_enabled,
-                        )
-                        rewritten_query = self.annotator.render(
-                            original_query=query,
-                            clarification_items=resolution.items,
-                            comparison_groups=plan.comparison_groups,
-                        )
-                    except ValueError as exc:
-                        log_pipeline_event(
-                            "annotator",
-                            "failure",
-                            str(exc),
-                            level=40,
-                            enabled=pipeline_logging_enabled,
-                        )
-                        rewritten_query = None
-                    else:
-                        log_pipeline_event(
-                            "annotator",
-                            "result",
-                            {"rewritten_query": rewritten_query},
-                            enabled=pipeline_logging_enabled,
-                        )
+            rewritten_query = None
+
         response = {
-            "clarification_plan": plan.model_dump(mode="python"),
-            "clarification_items": [item.model_dump(mode="python") for item in resolution.items],
+            "clarification_plan": time_plan.model_dump(mode="python"),
+            "clarification_items": build_rewriter_payload(
+                original_query=query,
+                time_plan=time_plan,
+                resolved_plan=resolved_plan,
+            )["bindings"],
             "rewritten_query": rewritten_query,
         }
-        log_pipeline_event(
-            "service",
-            "response",
-            response,
-            enabled=pipeline_logging_enabled,
-        )
+        log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)
         return response
+
+    @staticmethod
+    def _stage_b_requests(stage_a: StageAOutput) -> list[StageBRequest]:
+        requests: list[StageBRequest] = []
+        for index, unit in enumerate(stage_a.units):
+            if unit.content_kind != "standalone":
+                continue
+            requests.append(
+                StageBRequest(
+                    unit_id=unit.unit_id or f"__index_{index}__",
+                    text=unit.self_contained_text or unit.render_text,
+                    surface_hint=unit.surface_hint,
+                )
+            )
+        return requests
