@@ -19,7 +19,7 @@ _CALENDAR_GRAIN_PATTERN = re.compile(r"最近\s*(?P<length>\d+)\s*个(?P<token>�
 _SUPPORTED_DAY_CLASS = {
     "工作日": "workday",
     "周末": "weekend",
-    "节假日": "holiday",
+    "节假日": "statutory_holiday",
     "补班日": "makeup_workday",
 }
 
@@ -91,6 +91,7 @@ class StageBPlanner:
             else:
                 try:
                     _validate_calendar_event_keys(parsed, valid_keys=self._canonical_calendar_event_keys)
+                    _validate_holiday_event_selectors(parsed)
                 except ValueError as exc:
                     feedback = [f"Stage B semantic validation error: {exc}"]
                     error_kind = "semantic_validation_error"
@@ -265,3 +266,17 @@ def _iter_calendar_event_keys(anchor: Any | None) -> list[str]:
         keys.extend(_iter_calendar_event_keys(getattr(anchor, "endpoint_set", None)))
         return keys
     return []
+
+
+def _validate_holiday_event_selectors(output: StageBOutput) -> None:
+    if output.carrier is None:
+        return
+    anchor = output.carrier.anchor
+    if getattr(anchor, "kind", None) != "holiday_event_collection":
+        return
+    if getattr(anchor.parent, "kind", None) != "relative_window" or anchor.parent.grain != "year":
+        raise ValueError("holiday_event_collection only supports year-scoped relative_window parents")
+    if anchor.scope != "consecutive_rest":
+        raise ValueError("holiday_event_collection only supports scope='consecutive_rest'")
+    if anchor.selector != "all":
+        raise ValueError("holiday_event_collection selector must be 'all'")

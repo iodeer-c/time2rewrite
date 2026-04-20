@@ -8,7 +8,7 @@ from pydantic import Field
 
 from time_query_service.clarification_writer_prompt import build_clarification_writer_messages
 from time_query_service.resolved_plan import Interval, IntervalTree, ResolvedPlan
-from time_query_service.time_plan import CalendarFilter, GrainExpansion, GroupedTemporalValue, NamedPeriod, RollingByCalendarUnit, StandaloneContent, StrictModel, TimePlan
+from time_query_service.time_plan import CalendarFilter, GrainExpansion, GroupedTemporalValue, HolidayEventCollection, NamedPeriod, RollingByCalendarUnit, StandaloneContent, StrictModel, TimePlan
 
 
 ClarificationStatus = Literal["resolved", "unresolved"]
@@ -282,6 +282,12 @@ def _is_valid_clarified_query(
 
 
 def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) -> str | None:
+    if _is_holiday_event_selector_unit(unit):
+        member_texts = _member_interval_texts(tree, require_children=True)
+        if len(member_texts) <= 1:
+            return None
+        return f"依次为{'、'.join(member_texts)}"
+
     if tree.role == "grouped_member" and grouping_grain is not None:
         member_texts = _member_interval_texts(tree, require_children=True)
         if len(member_texts) == 1:
@@ -341,6 +347,7 @@ def _day_class_phrase(day_class: str) -> str:
         "workday": "工作日（含补班日）",
         "weekend": "周末",
         "holiday": "节假日",
+        "statutory_holiday": "法定节日本体日",
         "makeup_workday": "补班日",
     }
     return mapping.get(day_class, day_class)
@@ -351,6 +358,12 @@ def _should_list_filtered_members(unit, *, member_count: int) -> bool:
     if "每个" in label or "每天" in label:
         return True
     return member_count <= MAX_INLINE_FILTERED_MEMBER_COUNT
+
+
+def _is_holiday_event_selector_unit(unit) -> bool:
+    if unit.content.content_kind != "standalone" or unit.content.carrier is None:
+        return False
+    return isinstance(unit.content.carrier.anchor, HolidayEventCollection)
 
 
 def _coalesce_split_range_facts(

@@ -17,6 +17,7 @@ from time_query_service.time_plan import (
     EnumerationSet,
     GrainExpansion,
     GroupedTemporalValue,
+    HolidayEventCollection,
     MappedRange,
     MemberSelection,
     Modifier,
@@ -85,6 +86,8 @@ def materialize_anchor(
                 f"Missing calendar event span for {anchor.region}/{anchor.event_key}/{anchor.schedule_year_ref.year}/{anchor.scope}"
             )
         return _atom_tree(Interval(start=span[0], end=span[1], end_inclusive=True))
+    if isinstance(anchor, HolidayEventCollection):
+        return _materialize_holiday_event_collection(anchor, system_date, business_calendar, region)
     if isinstance(anchor, GroupedTemporalValue):
         return _materialize_grouped_temporal_value(anchor, system_date, business_calendar, region)
     if isinstance(anchor, MappedRange):
@@ -305,6 +308,7 @@ def _coerce_anchor(expr: Any) -> Anchor:
             EnumerationSet,
             GroupedTemporalValue,
             CalendarEvent,
+            HolidayEventCollection,
             MappedRange,
         ),
     ):
@@ -323,6 +327,28 @@ def _materialize_grouped_temporal_value(
     if base is None:
         raise ValueError("grouped_temporal_value parent must resolve to a continuous interval")
     children = [_atom_tree(bucket) for bucket in _partition_interval_by_grain(base, anchor.child_grain)]
+    intervals = [child.labels.absolute_core_time for child in children if child.labels.absolute_core_time is not None]
+    return IntervalTree(
+        role="grouped_member",
+        intervals=intervals,
+        children=children,
+        labels=TreeLabels(absolute_core_time=base),
+    )
+
+
+def _materialize_holiday_event_collection(
+    anchor: HolidayEventCollection,
+    system_date: date,
+    business_calendar: BusinessCalendarPort,
+    region: str,
+) -> IntervalTree:
+    parent_tree = materialize_anchor(anchor.parent, system_date=system_date, business_calendar=business_calendar, region=region)
+    base = parent_tree.labels.absolute_core_time
+    if base is None:
+        raise ValueError("holiday_event_collection parent must resolve to a continuous interval")
+
+    blocks = business_calendar.list_holiday_vacation_blocks(region=anchor.region, schedule_year=base.start.year)
+    children = [_atom_tree(Interval(start=block.start, end=block.end, end_inclusive=True)) for block in blocks]
     intervals = [child.labels.absolute_core_time for child in children if child.labels.absolute_core_time is not None]
     return IntervalTree(
         role="grouped_member",
@@ -490,6 +516,8 @@ def _matches_day_class(status: object, day_class: str) -> bool:
         return bool(getattr(status, "is_workday"))
     if day_class == "holiday":
         return bool(getattr(status, "is_holiday"))
+    if day_class == "statutory_holiday":
+        return bool(getattr(status, "is_statutory_holiday"))
     if day_class == "makeup_workday":
         return bool(getattr(status, "is_makeup_workday"))
     if day_class == "weekend":

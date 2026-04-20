@@ -18,7 +18,7 @@ PreResolverReasonKind = Literal[
 ]
 PeriodType = Literal["year", "quarter", "half_year", "month", "week", "day"]
 RollingEndpoint = Literal["today", "yesterday", "this_month_end", "previous_complete"]
-DayClass = Literal["workday", "weekend", "holiday", "makeup_workday"]
+DayClass = Literal["workday", "weekend", "holiday", "statutory_holiday", "makeup_workday"]
 CalendarEventScope = Literal["statutory", "consecutive_rest"]
 MappedRangeMode = Literal["bounded_pair", "period_to_date", "rolling_map"]
 MemberSelectionSelector = Literal["first", "last", "nth", "first_n", "last_n"]
@@ -134,6 +134,20 @@ class CalendarEvent(StrictModel):
     scope: CalendarEventScope
 
 
+class HolidayEventCollection(StrictModel):
+    kind: Literal["holiday_event_collection"]
+    parent: RelativeWindow
+    region: str
+    scope: Literal["consecutive_rest"] = "consecutive_rest"
+    selector: Literal["all"] = "all"
+
+    @model_validator(mode="after")
+    def validate_parent_scope(self) -> "HolidayEventCollection":
+        if self.parent.grain != "year":
+            raise ValueError("holiday_event_collection only supports year-scoped relative parents")
+        return self
+
+
 class EnumerationSet(StrictModel):
     kind: Literal["enumeration_set"]
     grain: Literal["year", "quarter", "half_year", "month", "week", "day", "calendar_event"]
@@ -179,6 +193,7 @@ Anchor = Annotated[
     | EnumerationSet
     | GroupedTemporalValue
     | CalendarEvent
+    | HolidayEventCollection
     | MappedRange,
     Field(discriminator="kind"),
 ]

@@ -160,6 +160,7 @@ class HolidayMembershipContribution:
     date: date
     event_key: str
     schedule_year: int
+    scope: Literal["consecutive_rest", "statutory"]
     calendar_version: str
 
 
@@ -168,6 +169,7 @@ class CanonicalDayStatus:
     date: date
     is_workday: bool
     is_holiday: bool
+    is_statutory_holiday: bool
     is_makeup_workday: bool
     labels: tuple[str, ...]
     related_event_keys: tuple[str, ...]
@@ -196,11 +198,26 @@ class BusinessCalendarPort(Protocol):
 
     def is_holiday(self, *, region: str, d: date) -> bool: ...
 
+    def is_statutory_holiday(self, *, region: str, d: date) -> bool: ...
+
     def calendar_version(self, region: str) -> str: ...
 
     def calendar_version_for_schedule_year(self, *, region: str, schedule_year: int) -> str | None: ...
 
     def list_makeup_workdays(self, *, region: str, event_key: str, schedule_year: int) -> list[date]: ...
+
+    def list_holiday_vacation_blocks(self, *, region: str, schedule_year: int) -> list["VacationBlockRecord"]: ...
+
+
+@dataclass(frozen=True)
+class VacationBlockRecord:
+    region: str
+    schedule_year: int
+    start: date
+    end: date
+    calendar_version: str
+    rest_group_id: str | None
+    event_keys: tuple[str, ...]
 
 
 class JsonBusinessCalendar:
@@ -276,6 +293,7 @@ class JsonBusinessCalendar:
                             date=covered_date,
                             event_key=span.event_key,
                             schedule_year=span.schedule_year,
+                            scope=span.scope,
                             calendar_version=calendar_file.calendar_version,
                         )
                     )
@@ -355,11 +373,13 @@ class JsonBusinessCalendar:
             labels.add(contribution.event_key)
             source_schedule_years.add(contribution.schedule_year)
             calendar_versions.add(contribution.calendar_version)
+        is_statutory_holiday = any(contribution.scope == "statutory" for contribution in holiday_contributions)
 
         return CanonicalDayStatus(
             date=d,
             is_workday=is_workday,
             is_holiday=bool(holiday_contributions),
+            is_statutory_holiday=is_statutory_holiday,
             is_makeup_workday=bool(related_event_keys),
             labels=tuple(sorted(labels)),
             related_event_keys=tuple(sorted(related_event_keys)),
@@ -373,6 +393,9 @@ class JsonBusinessCalendar:
 
     def is_holiday(self, *, region: str, d: date) -> bool:
         return self.get_day_status(region=region, d=d).is_holiday
+
+    def is_statutory_holiday(self, *, region: str, d: date) -> bool:
+        return self.get_day_status(region=region, d=d).is_statutory_holiday
 
     def calendar_version(self, region: str) -> str:
         versions = self._region_versions.get(region, [])
@@ -402,3 +425,40 @@ class JsonBusinessCalendar:
                     matched.append(item.date)
                     break
         return sorted(set(matched))
+
+    def list_holiday_vacation_blocks(self, *, region: str, schedule_year: int) -> list[VacationBlockRecord]:
+        version = self.calendar_version_for_schedule_year(region=region, schedule_year=schedule_year)
+        if version is None:
+            raise ValueError(f"Missing business calendar data for region={region}, schedule_year={schedule_year}")
+
+        grouped: dict[tuple[str, date, date] | tuple[str, tuple[date, date]], list[EventSpanRecord]] = {}
+        for span in self._event_spans.get(region, {}).values():
+            if span.schedule_year != schedule_year or span.scope != "consecutive_rest":
+                continue
+            if span.rest_group_id is not None:
+                key: tuple[str, date, date] | tuple[str, tuple[date, date]] = (
+                    span.rest_group_id,
+                    span.start,
+                    span.end,
+                )
+            else:
+                key = ("interval", (span.start, span.end))
+            grouped.setdefault(key, []).append(span)
+
+        blocks: list[VacationBlockRecord] = []
+        for spans in grouped.values():
+            spans = sorted(spans, key=lambda item: (item.start, item.end, item.event_key))
+            first = spans[0]
+            blocks.append(
+                VacationBlockRecord(
+                    region=region,
+                    schedule_year=schedule_year,
+                    start=first.start,
+                    end=first.end,
+                    calendar_version=version,
+                    rest_group_id=first.rest_group_id,
+                    event_keys=tuple(sorted({span.event_key for span in spans})),
+                )
+            )
+        blocks.sort(key=lambda block: (block.start, block.end, block.event_keys))
+        return blocks
