@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date as Date
+from datetime import datetime as DateTime
 from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
@@ -25,14 +25,17 @@ ComparisonDegradedReason = Literal[
 
 
 class Interval(StrictModel):
-    start: Date
-    end: Date
+    start: DateTime
+    end: DateTime
     end_inclusive: bool
 
     @model_validator(mode="after")
     def validate_bounds(self) -> "Interval":
         if self.start > self.end:
             raise ValueError("interval start must be <= end")
+        for dt in (self.start, self.end):
+            if dt.minute or dt.second or dt.microsecond:
+                raise ValueError("interval endpoints must be hour-aligned")
         return self
 
 
@@ -40,6 +43,7 @@ class TreeLabels(StrictModel):
     model_config = ConfigDict(extra="allow")
 
     absolute_core_time: Interval | None = None
+    display_precision: Literal["day", "hour"] | None = None
     source_unit_id: str | None = None
     degraded: bool | None = None
     degraded_source_reason_kind: ResolvedReasonKind | None = None

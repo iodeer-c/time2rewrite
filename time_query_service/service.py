@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,15 +87,15 @@ class QueryPipelineService:
         self,
         *,
         query: str,
-        system_date: str | None = None,
         system_datetime: str | None = None,
         timezone: str = "Asia/Shanghai",
         rewrite: bool = False,
     ) -> dict[str, Any]:
         if self._business_calendar is None:
             raise ValueError("business_calendar is required for the new pipeline")
-        if system_date is None:
-            raise ValueError("system_date is required for the new pipeline")
+        if system_datetime is None:
+            raise ValueError("system_datetime is required for the new pipeline")
+        _parse_system_datetime_input(system_datetime)
 
         pipeline_logging_enabled = self._is_pipeline_logging_enabled()
         log_pipeline_event(
@@ -102,7 +103,6 @@ class QueryPipelineService:
             "request",
             {
                 "query": query,
-                "system_date": system_date,
                 "system_datetime": system_datetime,
                 "timezone": timezone,
                 "rewrite": rewrite,
@@ -114,7 +114,7 @@ class QueryPipelineService:
             stage_a = run_stage_a(
                 text_runner=self.stage_a_runner,
                 query=query,
-                system_date=system_date,
+                system_datetime=system_datetime,
                 timezone=timezone,
                 pipeline_logging_enabled=pipeline_logging_enabled,
             )
@@ -135,7 +135,7 @@ class QueryPipelineService:
         stage_b_outputs = run_stage_b_batch(
             text_runner=self.stage_b_runner,
             requests=stage_b_requests,
-            system_date=system_date,
+            system_datetime=system_datetime,
             timezone=timezone,
             max_concurrent=self._max_stage_b_concurrent,
             pipeline_logging_enabled=pipeline_logging_enabled,
@@ -198,3 +198,10 @@ class QueryPipelineService:
                 )
             )
         return requests
+
+
+def _parse_system_datetime_input(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    except ValueError as exc:
+        raise ValueError("system_datetime must use YYYY-MM-DDTHH:MM:SS") from exc

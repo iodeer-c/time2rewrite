@@ -20,7 +20,7 @@ class StageAPlanner:
         self,
         *,
         query: str,
-        system_date: str,
+        system_datetime: str,
         timezone: str,
         previous_validation_errors: list[str] | None = None,
     ) -> StageAOutput:
@@ -31,7 +31,7 @@ class StageAPlanner:
             started = perf_counter()
             raw_content = self._invoke_once(
                 query=query,
-                system_date=system_date,
+                system_datetime=system_datetime,
                 timezone=timezone,
                 previous_validation_errors=feedback or None,
             )
@@ -93,14 +93,14 @@ class StageAPlanner:
         self,
         *,
         query: str,
-        system_date: str,
+        system_datetime: str,
         timezone: str,
         previous_validation_errors: list[str] | None,
     ) -> str:
         response = self._text_runner.invoke(
             build_stage_a_messages(
                 query=query,
-                system_date=system_date,
+                system_datetime=system_datetime,
                 timezone=timezone,
                 previous_validation_errors=previous_validation_errors,
             )
@@ -115,7 +115,7 @@ def run_stage_a(
     *,
     text_runner: Any,
     query: str,
-    system_date: str,
+    system_datetime: str,
     timezone: str,
     previous_validation_errors: list[str] | None = None,
     pipeline_logging_enabled: bool = False,
@@ -123,7 +123,7 @@ def run_stage_a(
     planner = StageAPlanner(text_runner=text_runner, pipeline_logging_enabled=pipeline_logging_enabled)
     return planner.run_stage_a(
         query=query,
-        system_date=system_date,
+        system_datetime=system_datetime,
         timezone=timezone,
         previous_validation_errors=previous_validation_errors,
     )

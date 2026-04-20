@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from time_query_service.post_processor import (
     PostProcessorValidationError,
+    _validate_non_head_non_day_grain_expansion,
     _validate_carrier_semantics,
     _validate_layer4,
 )
@@ -37,7 +38,7 @@ def validate_time_plan(plan: TimePlan) -> None:
         raise TimePlanSemanticValidationError(layer=3, details=exc.details, unit_id=exc.unit_id) from exc
 
     try:
-        _validate_layer4(plan.units, plan.comparisons, system_date=plan.system_date)
+        _validate_layer4(plan.units, plan.comparisons, system_datetime=plan.system_datetime)
     except PostProcessorValidationError as exc:
         raise TimePlanTopologyValidationError(layer=4, details=exc.details, unit_id=exc.unit_id) from exc
 
@@ -68,7 +69,11 @@ def _reject_transient_non_day_grain_expansion(unit) -> None:
     carrier = unit.content.carrier
     if carrier is None:
         return
-    if any(isinstance(modifier, GrainExpansion) and modifier.target_grain != "day" for modifier in carrier.modifiers):
+    _validate_non_head_non_day_grain_expansion(carrier, unit_id=unit.unit_id)
+    if any(
+        isinstance(modifier, GrainExpansion) and modifier.target_grain not in {"day", "hour"}
+        for modifier in carrier.modifiers
+    ):
         raise PostProcessorValidationError(
             layer=3,
             stage="new_plan_validator",

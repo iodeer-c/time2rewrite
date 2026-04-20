@@ -3,18 +3,20 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from time_query_service.business_calendar import JsonBusinessCalendar
 from time_query_service.carrier_materializer import materialize_carrier
 from time_query_service.config import get_business_calendar_root
 from time_query_service.derivation_registry import get_derivation_transform_spec
 from time_query_service.pipeline_logging import log_pipeline_event
+from time_query_service.tree_ops import structural_grain
 from time_query_service.time_plan import (
+    Anchor,
     CalendarEvent,
     CalendarFilter,
     Carrier,
@@ -22,14 +24,18 @@ from time_query_service.time_plan import (
     ComparisonPair,
     Content,
     DateRange,
+    DatetimeRange,
     DerivationSource,
     EnumerationSet,
     GrainExpansion,
     GroupedTemporalValue,
+    HolidayEventCollection,
     MemberSelection,
     MappedRange,
     NamedPeriod,
+    Offset,
     PreResolverReasonKind,
+    RelativeWindow,
     RollingByCalendarUnit,
     RollingWindow,
     StandaloneContent,
@@ -70,7 +76,7 @@ class StageAComparisonOutput(StrictModel):
 
 class StageAOutput(StrictModel):
     query: str
-    system_date: date
+    system_datetime: datetime
     timezone: str
     units: list[StageAUnitOutput]
     comparisons: list[StageAComparisonOutput] = Field(default_factory=list)
@@ -130,11 +136,11 @@ def assemble_time_plan(
             for index, unit in enumerate(stage_a.units)
         ]
         comparisons = _assemble_comparisons(stage_a.comparisons, lookup_by_original)
-        comparisons = _validate_layer4(units, comparisons, system_date=stage_a.system_date)
+        comparisons = _validate_layer4(units, comparisons, system_datetime=stage_a.system_datetime)
 
         plan = TimePlan(
             query=stage_a.query,
-            system_date=stage_a.system_date,
+            system_datetime=stage_a.system_datetime,
             timezone=stage_a.timezone,
             units=units,
             comparisons=comparisons,
@@ -304,7 +310,7 @@ def _validate_layer4(
     units: list[Unit],
     comparisons: list[Comparison],
     *,
-    system_date: date,
+    system_datetime: datetime,
 ) -> list[Comparison]:
     unit_map = {unit.unit_id: unit for unit in units}
     for comparison in comparisons:
@@ -329,7 +335,7 @@ def _validate_layer4(
     }
     _validate_derivation_transforms(units)
     _assert_acyclic(graph)
-    return _expand_comparisons(comparisons, unit_map=unit_map, system_date=system_date)
+    return _expand_comparisons(comparisons, unit_map=unit_map, system_datetime=system_datetime)
 
 
 def _assert_acyclic(graph: dict[str, list[str]]) -> None:
@@ -423,11 +429,12 @@ def _validate_bounded_range_single_unit(
 
 
 def _is_bounded_range_endpoint_anchor(anchor: object) -> bool:
-    return isinstance(anchor, (NamedPeriod, DateRange))
+    return isinstance(anchor, (NamedPeriod, DateRange, DatetimeRange))
 
 
 def _validate_carrier_semantics(unit: StageAUnitOutput, carrier: Carrier, *, unit_id: str) -> None:
     _validate_non_head_non_day_grain_expansion(carrier, unit_id=unit_id)
+    _validate_hour_modifier_topology(carrier, unit_id=unit_id)
     if unit.surface_hint == "calendar_grain_rolling" and _is_calendar_grain_rolling_approximation(carrier):
         calendar_filter = next(
             modifier for modifier in carrier.modifiers if isinstance(modifier, CalendarFilter)
@@ -465,13 +472,15 @@ def _validate_carrier_semantics(unit: StageAUnitOutput, carrier: Carrier, *, uni
         _validate_frozen_rolling_window(anchor, unit_id=unit_id)
     elif isinstance(anchor, RollingByCalendarUnit):
         _validate_frozen_rolling_by_calendar(anchor, unit_id=unit_id)
+    elif isinstance(anchor, MappedRange):
+        _validate_mapped_range_semantics(anchor, unit_id=unit_id)
 
 
 def _validate_non_head_non_day_grain_expansion(carrier: Carrier, *, unit_id: str) -> None:
     non_day_indexes = [
         index
         for index, modifier in enumerate(carrier.modifiers)
-        if isinstance(modifier, GrainExpansion) and modifier.target_grain != "day"
+        if isinstance(modifier, GrainExpansion) and modifier.target_grain not in {"day", "hour"}
     ]
     if not non_day_indexes:
         return
@@ -482,6 +491,150 @@ def _validate_non_head_non_day_grain_expansion(carrier: Carrier, *, unit_id: str
             unit_id=unit_id,
             details="non-day GrainExpansion must appear at the head of the chain for post-processor canonicalization",
         )
+
+
+def _validate_hour_modifier_topology(carrier: Carrier, *, unit_id: str) -> None:
+    current_grain = structural_grain(carrier.anchor)
+    for modifier in carrier.modifiers:
+        if isinstance(modifier, CalendarFilter) and current_grain == "hour":
+            raise PostProcessorValidationError(
+                layer=3,
+                stage="post_processor",
+                unit_id=unit_id,
+                details="CalendarFilter does not support hour-native carriers",
+            )
+        if isinstance(modifier, GrainExpansion) and modifier.target_grain == "hour":
+            if current_grain != "day":
+                raise PostProcessorValidationError(
+                    layer=3,
+                    stage="post_processor",
+                    unit_id=unit_id,
+                    details="GrainExpansion(target_grain=\"hour\") requires a day-native parent",
+                )
+            current_grain = "hour"
+            continue
+        if isinstance(modifier, Offset) and modifier.unit == "hour":
+            if current_grain != "hour":
+                raise PostProcessorValidationError(
+                    layer=3,
+                    stage="post_processor",
+                    unit_id=unit_id,
+                    details="Offset(unit=\"hour\") only applies to hour-native carriers",
+                )
+        if isinstance(modifier, GrainExpansion):
+            current_grain = modifier.target_grain
+
+
+def _validate_mapped_range_semantics(anchor: MappedRange, *, unit_id: str) -> None:
+    if anchor.mode != "bounded_pair":
+        return
+    _validate_bounded_pair_endpoint(anchor.start, unit_id=unit_id, side="start")
+    _validate_bounded_pair_endpoint(anchor.end, unit_id=unit_id, side="end")
+    start_precision = _bounded_pair_endpoint_precision(anchor.start, unit_id=unit_id, side="start")
+    if _is_current_time_bounded_pair_endpoint(anchor.end):
+        end_precision = start_precision
+    else:
+        end_precision = _bounded_pair_endpoint_precision(anchor.end, unit_id=unit_id, side="end")
+    if start_precision != end_precision:
+        raise PostProcessorValidationError(
+            layer=3,
+            stage="post_processor",
+            unit_id=unit_id,
+            details="mapped_range bounded_pair requires single-precision endpoints; mixed precision is unsupported",
+        )
+
+
+def _validate_bounded_pair_endpoint(expr: Any, *, unit_id: str, side: str) -> None:
+    if expr is None:
+        raise PostProcessorValidationError(
+            layer=3,
+            stage="post_processor",
+            unit_id=unit_id,
+            details=f"mapped_range bounded_pair requires {side} endpoint",
+        )
+    if expr == "system_datetime":
+        return
+
+    anchor = _coerce_bounded_pair_endpoint(expr, unit_id=unit_id, side=side)
+    if isinstance(anchor, (NamedPeriod, DateRange, DatetimeRange)):
+        return
+    if isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0:
+        return
+    if isinstance(anchor, EnumerationSet):
+        for member in anchor.members:
+            _validate_bounded_pair_endpoint(member, unit_id=unit_id, side=side)
+        return
+    raise PostProcessorValidationError(
+        layer=3,
+        stage="post_processor",
+        unit_id=unit_id,
+        details=f"mapped_range bounded_pair does not support {side} endpoint type {type(anchor).__name__}",
+    )
+
+
+def _coerce_bounded_pair_endpoint(expr: Any, *, unit_id: str, side: str) -> object:
+    if isinstance(
+        expr,
+        (
+            NamedPeriod,
+            DateRange,
+            DatetimeRange,
+            RelativeWindow,
+            RollingWindow,
+            RollingByCalendarUnit,
+            EnumerationSet,
+            GroupedTemporalValue,
+            CalendarEvent,
+            HolidayEventCollection,
+            MappedRange,
+        ),
+    ):
+        return expr
+    try:
+        return TypeAdapter(Anchor).validate_python(expr)
+    except ValidationError as exc:
+        raise PostProcessorValidationError(
+            layer=3,
+            stage="post_processor",
+            unit_id=unit_id,
+            details=f"mapped_range bounded_pair {side} endpoint is invalid: {exc}",
+        ) from exc
+
+
+def _bounded_pair_endpoint_precision(expr: Any, *, unit_id: str, side: str) -> str:
+    if expr == "system_datetime":
+        return "day"
+    anchor = _coerce_bounded_pair_endpoint(expr, unit_id=unit_id, side=side)
+    if isinstance(anchor, DatetimeRange):
+        return "hour"
+    if isinstance(anchor, RelativeWindow):
+        return "hour" if anchor.grain == "hour" else "day"
+    if isinstance(anchor, RollingWindow):
+        return "hour" if anchor.unit == "hour" else "day"
+    if isinstance(anchor, EnumerationSet):
+        precisions = {
+            _bounded_pair_endpoint_precision(member, unit_id=unit_id, side=side)
+            for member in anchor.members
+        }
+        if len(precisions) != 1:
+            raise PostProcessorValidationError(
+                layer=3,
+                stage="post_processor",
+                unit_id=unit_id,
+                details=f"mapped_range bounded_pair {side} enumeration endpoint must use a single precision",
+            )
+        return precisions.pop()
+    return "day"
+
+
+def _is_current_time_bounded_pair_endpoint(expr: Any) -> bool:
+    if expr == "system_datetime":
+        return True
+    try:
+        anchor = _coerce_bounded_pair_endpoint(expr, unit_id="__system__", side="end")
+    except PostProcessorValidationError:
+        return False
+    return isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0
 
 
 def _is_calendar_grain_rolling_approximation(carrier: Carrier) -> bool:
@@ -581,12 +734,12 @@ def _natural_member_interval(member: object) -> tuple[date, date]:
     if isinstance(member, NamedPeriod):
         interval = materialize_carrier(
             Carrier(anchor=member, modifiers=[]),
-            system_date=date.today(),
+            system_datetime=datetime.combine(date.today(), datetime.min.time()),
             business_calendar=_load_business_calendar(),
         ).labels.absolute_core_time
         if interval is None:
             raise ValueError("NamedPeriod materialization produced no interval")
-        return (interval.start, interval.end)
+        return (interval.start.date(), interval.end.date())
     if hasattr(member, "start_date") and hasattr(member, "end_date"):
         return (member.start_date, member.end_date)
     raise ValueError(f"Unsupported natural EnumerationSet member: {type(member)!r}")
@@ -648,7 +801,7 @@ def _canonicalize_carrier(carrier: Carrier) -> Carrier:
     first_modifier = carrier.modifiers[0]
     if (
         isinstance(first_modifier, GrainExpansion)
-        and first_modifier.target_grain != "day"
+        and first_modifier.target_grain not in {"day", "hour"}
         and carrier.anchor.kind in {"named_period", "date_range", "relative_window", "rolling_window", "calendar_event"}
     ):
         return Carrier(
@@ -683,7 +836,7 @@ def _expand_comparisons(
     comparisons: list[Comparison],
     *,
     unit_map: dict[str, Unit],
-    system_date: date,
+    system_datetime: datetime,
 ) -> list[Comparison]:
     expanded_comparisons: list[Comparison] = []
     for comparison in comparisons:
@@ -692,12 +845,12 @@ def _expand_comparisons(
             subject_cardinality = _comparison_endpoint_cardinality(
                 unit_map[pair.subject_unit_id],
                 unit_map=unit_map,
-                system_date=system_date,
+                system_datetime=system_datetime,
             )
             reference_cardinality = _comparison_endpoint_cardinality(
                 unit_map[pair.reference_unit_id],
                 unit_map=unit_map,
-                system_date=system_date,
+                system_datetime=system_datetime,
             )
             if subject_cardinality == 1 and reference_cardinality == 1:
                 expanded_pairs.append(pair.model_copy(update={"expansion": None}))
@@ -740,14 +893,18 @@ def _comparison_endpoint_cardinality(
     unit: Unit,
     *,
     unit_map: dict[str, Unit],
-    system_date: date,
+    system_datetime: datetime,
 ) -> int:
     if unit.content.content_kind == "derived":
         if len(unit.content.sources) > 1:
             return len(unit.content.sources)
         if not unit.content.sources:
             return 1
-        return _comparison_endpoint_cardinality(unit_map[unit.content.sources[0].source_unit_id], unit_map=unit_map, system_date=system_date)
+        return _comparison_endpoint_cardinality(
+            unit_map[unit.content.sources[0].source_unit_id],
+            unit_map=unit_map,
+            system_datetime=system_datetime,
+        )
 
     carrier = unit.content.carrier
     if carrier is None:
@@ -755,11 +912,11 @@ def _comparison_endpoint_cardinality(
     anchor = carrier.anchor
     if isinstance(anchor, RollingByCalendarUnit):
         return 1
-    if anchor.kind in {"named_period", "date_range", "relative_window", "rolling_window", "calendar_event"}:
+    if anchor.kind in {"named_period", "date_range", "datetime_range", "relative_window", "rolling_window", "calendar_event"}:
         return 1
     if isinstance(anchor, (EnumerationSet, GroupedTemporalValue, MappedRange)):
         selection = next((modifier for modifier in carrier.modifiers if isinstance(modifier, MemberSelection)), None)
-        base_cardinality = _explicit_sibling_cardinality(carrier, system_date=system_date)
+        base_cardinality = _explicit_sibling_cardinality(carrier, system_datetime=system_datetime)
         if selection is None:
             return max(base_cardinality, 1)
         if selection.selector in {"first", "last", "nth"}:
@@ -770,13 +927,13 @@ def _comparison_endpoint_cardinality(
     return 1
 
 
-def _explicit_sibling_cardinality(carrier: Carrier, *, system_date: date) -> int:
+def _explicit_sibling_cardinality(carrier: Carrier, *, system_datetime: datetime) -> int:
     if isinstance(carrier.anchor, EnumerationSet):
         return len(carrier.anchor.members)
     stripped_modifiers = [modifier for modifier in carrier.modifiers if not isinstance(modifier, MemberSelection)]
     tree = materialize_carrier(
         Carrier(anchor=carrier.anchor, modifiers=stripped_modifiers),
-        system_date=system_date,
+        system_datetime=system_datetime,
         business_calendar=_load_business_calendar(),
     )
     return len(tree.children) if tree.children else len(tree.intervals)

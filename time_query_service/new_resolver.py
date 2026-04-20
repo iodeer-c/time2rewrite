@@ -41,7 +41,7 @@ def resolve_plan(
             try:
                 tree = materialize_carrier(
                     unit.content.carrier,
-                    system_date=plan.system_date,
+                    system_datetime=plan.system_datetime,
                     business_calendar=business_calendar,
                 )
             except ValueError as exc:
@@ -111,6 +111,7 @@ def _toposort_units(units: list[Unit]) -> list[Unit]:
 def _resolve_derived_unit(unit: Unit, nodes: dict[str, ResolvedNode]) -> ResolvedNode:
     assert isinstance(unit.content, DerivedContent)
     children: list[IntervalTree] = []
+    healthy_precisions: set[str] = set()
 
     for source in unit.content.sources:
         source_node = nodes[source.source_unit_id]
@@ -128,6 +129,8 @@ def _resolve_derived_unit(unit: Unit, nodes: dict[str, ResolvedNode]) -> Resolve
             )
         else:
             shifted = shift_tree(source_node.tree, source.transform.model_dump(mode="python"))
+            if shifted.labels.display_precision is not None:
+                healthy_precisions.add(shifted.labels.display_precision)
             child = IntervalTree(
                 role="derived_source",
                 intervals=[shifted.labels.absolute_core_time] if shifted.labels.absolute_core_time is not None else [],
@@ -135,6 +138,7 @@ def _resolve_derived_unit(unit: Unit, nodes: dict[str, ResolvedNode]) -> Resolve
                 labels=TreeLabels(
                     source_unit_id=source.source_unit_id,
                     absolute_core_time=shifted.labels.absolute_core_time,
+                    display_precision=shifted.labels.display_precision,
                     degraded=False,
                     derivation_transform_summary=source.transform.model_dump(mode="python"),
                 ),
@@ -142,11 +146,18 @@ def _resolve_derived_unit(unit: Unit, nodes: dict[str, ResolvedNode]) -> Resolve
         children.append(child)
 
     healthy_intervals = [child.labels.absolute_core_time for child in children if child.labels.absolute_core_time is not None]
+    if len(healthy_precisions) > 1:
+        return ResolvedNode(
+            tree=IntervalTree(role="derived", intervals=[], children=children, labels=TreeLabels()),
+            needs_clarification=True,
+            reason_kind="unsupported_anchor_semantics",
+            derived_from=[source.source_unit_id for source in unit.content.sources],
+        )
     tree = IntervalTree(
         role="derived",
         intervals=healthy_intervals,
         children=children,
-        labels=TreeLabels(),
+        labels=TreeLabels(display_precision=next(iter(healthy_precisions)) if healthy_precisions else None),
     )
     if healthy_intervals:
         return ResolvedNode(tree=tree, derived_from=[source.source_unit_id for source in unit.content.sources])

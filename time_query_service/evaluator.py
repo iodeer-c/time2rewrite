@@ -58,7 +58,7 @@ def evaluate_stage_a_golden(
     *,
     cases: list[dict[str, Any]],
     text_runner: Any,
-    system_date: str,
+    system_datetime: str,
     timezone: str,
     pipeline_logging_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -68,7 +68,7 @@ def evaluate_stage_a_golden(
         actual = run_stage_a(
             text_runner=text_runner,
             query=case["query"],
-            system_date=system_date,
+            system_datetime=system_datetime,
             timezone=timezone,
             pipeline_logging_enabled=pipeline_logging_enabled,
         )
@@ -90,7 +90,7 @@ def evaluate_stage_b_golden(
     *,
     cases: list[dict[str, Any]],
     text_runner: Any,
-    system_date: str,
+    system_datetime: str,
     timezone: str,
     pipeline_logging_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -99,7 +99,7 @@ def evaluate_stage_b_golden(
         actual = run_stage_b_batch(
             text_runner=text_runner,
             requests=[StageBRequest(unit_id=f"u{index+1}", text=case["text"])],
-            system_date=system_date,
+            system_datetime=system_datetime,
             timezone=timezone,
             max_concurrent=1,
             pipeline_logging_enabled=pipeline_logging_enabled,
@@ -141,7 +141,7 @@ def evaluate_layer1_golden(
             stage_a = run_stage_a(
                 text_runner=stage_a_runner,
                 query=case["query"],
-                system_date=case["system_date"],
+                system_datetime=case["system_datetime"],
                 timezone="Asia/Shanghai",
                 pipeline_logging_enabled=pipeline_logging_enabled,
             )
@@ -157,7 +157,7 @@ def evaluate_layer1_golden(
             stage_b_outputs = run_stage_b_batch(
                 text_runner=stage_b_runner,
                 requests=requests,
-                system_date=case["system_date"],
+                system_datetime=case["system_datetime"],
                 timezone="Asia/Shanghai",
                 max_concurrent=max_stage_b_concurrent,
                 pipeline_logging_enabled=pipeline_logging_enabled,
@@ -634,9 +634,21 @@ def _compare_interval_list(expected: list[Interval], actual: list[Interval], *, 
 
 def _compare_interval(expected: Interval, actual: Interval, *, path: str, diffs: list[ComparatorDiff]) -> None:
     if expected.start != actual.start:
-        diffs.append(ComparatorDiff(f"{path}.start", expected.start, actual.start))
+        diffs.append(
+            ComparatorDiff(
+                f"{path}.start",
+                _serialize_interval_endpoint(expected.start),
+                _serialize_interval_endpoint(actual.start),
+            )
+        )
     if expected.end != actual.end:
-        diffs.append(ComparatorDiff(f"{path}.end", expected.end, actual.end))
+        diffs.append(
+            ComparatorDiff(
+                f"{path}.end",
+                _serialize_interval_endpoint(expected.end),
+                _serialize_interval_endpoint(actual.end),
+            )
+        )
     if expected.end_inclusive != actual.end_inclusive:
         diffs.append(ComparatorDiff(f"{path}.end_inclusive", expected.end_inclusive, actual.end_inclusive))
 
@@ -645,7 +657,13 @@ def _compare_labels(expected: dict[str, Any], actual: dict[str, Any], *, path: s
     keys = sorted(set(expected) | set(actual))
     for key in keys:
         if expected.get(key) != actual.get(key):
-            diffs.append(ComparatorDiff(f"{path}.{key}", expected.get(key), actual.get(key)))
+            diffs.append(
+                ComparatorDiff(
+                    f"{path}.{key}",
+                    _serialize_comparator_value(expected.get(key)),
+                    _serialize_comparator_value(actual.get(key)),
+                )
+            )
 
 
 def _compare_comparisons(expected: list[ResolvedComparison], actual: list[ResolvedComparison], diffs: list[ComparatorDiff]) -> None:
@@ -760,6 +778,22 @@ def _serialize_diffs(diffs: list[ComparatorDiff]) -> list[dict[str, Any]]:
     ]
 
 
+def _serialize_interval_endpoint(value: Any) -> Any:
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _serialize_comparator_value(value: Any) -> Any:
+    if isinstance(value, Interval):
+        return {
+            "start": value.start.isoformat(),
+            "end": value.end.isoformat(),
+            "end_inclusive": value.end_inclusive,
+        }
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 def _evaluation_report(results: list[dict[str, Any]]) -> dict[str, Any]:
     passed_cases = sum(1 for result in results if result["passed"])
     total_cases = len(results)
@@ -823,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         report["stage_a"] = evaluate_stage_a_golden(
             cases=STAGE_A_GOLDEN_CASES,
             text_runner=stage_a_runner,
-            system_date="2026-04-17",
+            system_datetime="2026-04-17T00:00:00",
             timezone="Asia/Shanghai",
             pipeline_logging_enabled=runtime_config.pipeline_logging.enabled,
         )
@@ -831,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
         report["stage_b"] = evaluate_stage_b_golden(
             cases=STAGE_B_GOLDEN_CASES,
             text_runner=stage_b_runner,
-            system_date="2026-04-17",
+            system_datetime="2026-04-17T00:00:00",
             timezone="Asia/Shanghai",
             pipeline_logging_enabled=runtime_config.pipeline_logging.enabled,
         )

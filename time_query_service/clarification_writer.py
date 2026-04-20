@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 import re
 
@@ -8,6 +8,7 @@ from pydantic import Field
 
 from time_query_service.clarification_writer_prompt import build_clarification_writer_messages
 from time_query_service.resolved_plan import Interval, IntervalTree, ResolvedPlan
+from time_query_service.tree_ops import display_precision
 from time_query_service.time_plan import CalendarFilter, GrainExpansion, GroupedTemporalValue, HolidayEventCollection, NamedPeriod, RollingByCalendarUnit, StandaloneContent, StrictModel, TimePlan
 
 
@@ -22,6 +23,7 @@ class ClarificationFact(StrictModel):
     resolved_text: str | None = None
     detail_text: str | None = None
     grouping_grain: str | None = None
+    precision: Literal["day", "hour"] | None = None
     reason_kind: str | None = None
     derived_from: list[str] = Field(default_factory=list)
     comparison_peers: list[str] = Field(default_factory=list)
@@ -38,6 +40,7 @@ def build_clarification_facts(
     for unit in time_plan.units:
         node = resolved_plan.nodes.get(unit.unit_id)
         grouping_grain = _grouping_grain_for_unit(unit)
+        precision = _precision_for_unit(unit, node.tree if node and node.tree is not None else None)
         if node is None or node.needs_clarification or node.tree is None or node.tree.labels.absolute_core_time is None:
             facts.append(
                 ClarificationFact(
@@ -45,6 +48,7 @@ def build_clarification_facts(
                     label=unit.render_text,
                     status="unresolved",
                     grouping_grain=grouping_grain,
+                    precision=precision,
                     reason_kind=None if node is None else node.reason_kind,
                     derived_from=[] if node is None or node.derived_from is None else list(node.derived_from),
                     comparison_peers=comparison_peers.get(unit.unit_id, []),
@@ -56,9 +60,10 @@ def build_clarification_facts(
                     unit_id=unit.unit_id,
                     label=unit.render_text,
                     status="resolved",
-                    resolved_text=_format_interval(node.tree.labels.absolute_core_time),
+                    resolved_text=_format_interval(node.tree.labels.absolute_core_time, precision=precision or "day"),
                     detail_text=_detail_text_for_unit(unit, node.tree, grouping_grain),
                     grouping_grain=grouping_grain,
+                    precision=precision,
                     derived_from=[] if node.derived_from is None else list(node.derived_from),
                     comparison_peers=comparison_peers.get(unit.unit_id, []),
                 )
@@ -130,16 +135,29 @@ def _render_fact(fact: ClarificationFact) -> str:
     return f"{fact.label}当前无法确定"
 
 
-def _format_interval(interval: Interval) -> str:
-    start = _format_date(interval.start)
-    end = _format_date(interval.end)
-    if interval.start == interval.end:
+def _format_interval(interval: Interval, *, precision: Literal["day", "hour"]) -> str:
+    if precision == "hour":
+        start = _format_hour(interval.start)
+        end = _format_hour(interval.end)
+        if interval.start == interval.end:
+            return start
+        if interval.start.date() == interval.end.date():
+            return f"{start}至{interval.end:%H}:00"
+        return f"{start}至{end}"
+
+    start = _format_date(interval.start.date())
+    end = _format_date(interval.end.date())
+    if interval.start.date() == interval.end.date():
         return start
     return f"{start}至{end}"
 
 
 def _format_date(value: date) -> str:
     return f"{value.year}年{value.month}月{value.day}日"
+
+
+def _format_hour(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d %H:00")
 
 
 def _comparison_peer_map(resolved_plan: ResolvedPlan) -> dict[str, list[str]]:
@@ -169,6 +187,7 @@ def _grouping_grain_for_unit(unit) -> str | None:
 
 def _grouping_phrase(grain: str) -> str:
     mapping = {
+        "hour": "自然小时",
         "day": "自然日",
         "week": "自然周",
         "month": "自然月",
@@ -220,7 +239,7 @@ def _coalesce_split_bounded_range_facts(
         unit_id=f"{left.unit_id}+{right.unit_id}",
         label=range_label,
         status="resolved",
-        resolved_text=_format_interval(merged),
+        resolved_text=_format_interval(merged, precision=left.precision or "day"),
     )
 
 
@@ -319,15 +338,16 @@ def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) 
 
 
 def _member_interval_texts(tree: IntervalTree, *, require_children: bool = False) -> list[str]:
+    precision = tree.labels.display_precision or "day"
     if tree.children:
         return [
-            _format_interval(child.labels.absolute_core_time)
+            _format_interval(child.labels.absolute_core_time, precision=precision)
             for child in tree.children
             if child.labels.absolute_core_time is not None
         ]
     if require_children:
         return []
-    return [_format_interval(interval) for interval in tree.intervals]
+    return [_format_interval(interval, precision=precision) for interval in tree.intervals]
 
 
 def _day_class_for_unit(unit) -> str | None:
@@ -358,6 +378,14 @@ def _should_list_filtered_members(unit, *, member_count: int) -> bool:
     if "每个" in label or "每天" in label:
         return True
     return member_count <= MAX_INLINE_FILTERED_MEMBER_COUNT
+
+
+def _precision_for_unit(unit, tree: IntervalTree | None) -> Literal["day", "hour"]:
+    if unit.content.content_kind == "standalone" and unit.content.carrier is not None:
+        return display_precision(unit.content.carrier)
+    if tree is not None and tree.labels.display_precision is not None:
+        return tree.labels.display_precision
+    return "day"
 
 
 def _is_holiday_event_selector_unit(unit) -> bool:
@@ -455,7 +483,7 @@ def _maybe_coalesce_range_pair(
         unit_id=left_fact.unit_id,
         label=f"{left_fact.label}{connector}{right_fact.label}",
         status="resolved",
-        resolved_text=_format_interval(merged_interval),
+        resolved_text=_format_interval(merged_interval, precision=left_fact.precision or "day"),
         detail_text=None,
         grouping_grain=None,
         reason_kind=None,

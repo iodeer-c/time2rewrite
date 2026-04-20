@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date as Date
+from datetime import datetime as DateTime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,7 +24,7 @@ CalendarEventScope = Literal["statutory", "consecutive_rest"]
 MappedRangeMode = Literal["bounded_pair", "period_to_date", "rolling_map"]
 MemberSelectionSelector = Literal["first", "last", "nth", "first_n", "last_n"]
 TreeComparisonSingleScope = Literal["per_group", "global"]
-OffsetUnit = Literal["day", "week", "month", "quarter", "half_year", "year"]
+OffsetUnit = Literal["hour", "day", "week", "month", "quarter", "half_year", "year"]
 
 
 class SurfaceFragment(StrictModel):
@@ -81,16 +82,32 @@ class DateRange(StrictModel):
         return self
 
 
+class DatetimeRange(StrictModel):
+    kind: Literal["datetime_range"]
+    start_datetime: DateTime
+    end_datetime: DateTime
+    end_inclusive: bool = True
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "DatetimeRange":
+        for dt in (self.start_datetime, self.end_datetime):
+            if dt.minute or dt.second or dt.microsecond:
+                raise ValueError("datetime_range endpoints must be hour-aligned")
+        if self.start_datetime > self.end_datetime:
+            raise ValueError("datetime_range start_datetime must be <= end_datetime")
+        return self
+
+
 class RelativeWindow(StrictModel):
     kind: Literal["relative_window"]
-    grain: Literal["day", "week", "month", "quarter", "half_year", "year"]
+    grain: Literal["hour", "day", "week", "month", "quarter", "half_year", "year"]
     offset_units: int
 
 
 class RollingWindow(StrictModel):
     kind: Literal["rolling_window"]
     length: int
-    unit: Literal["day", "week", "month", "quarter", "half_year", "year"]
+    unit: Literal["hour", "day", "week", "month", "quarter", "half_year", "year"]
     endpoint: RollingEndpoint
     include_endpoint: bool = True
 
@@ -187,6 +204,7 @@ GroupedParentAnchor = Annotated[
 Anchor = Annotated[
     NamedPeriod
     | DateRange
+    | DatetimeRange
     | RelativeWindow
     | RollingWindow
     | RollingByCalendarUnit
@@ -201,7 +219,7 @@ Anchor = Annotated[
 
 class GrainExpansion(StrictModel):
     kind: Literal["grain_expansion"]
-    target_grain: Literal["day", "week", "month", "quarter", "half_year", "year"]
+    target_grain: Literal["hour", "day", "week", "month", "quarter", "half_year", "year"]
     scope: TreeComparisonSingleScope | None = None
 
 
@@ -338,7 +356,7 @@ class Unit(StrictModel):
 
 class TimePlan(StrictModel):
     query: str
-    system_date: Date
+    system_datetime: DateTime
     timezone: str
     units: list[Unit]
     comparisons: list[Comparison] = Field(default_factory=list)

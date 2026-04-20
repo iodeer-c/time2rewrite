@@ -4,6 +4,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Iterable
 
@@ -43,7 +44,7 @@ class StageBPlanner:
         *,
         unit_id: str,
         text: str,
-        system_date: str,
+        system_datetime: str,
         timezone: str,
         previous_validation_errors: list[str] | None = None,
         surface_hint: str | None = None,
@@ -58,7 +59,7 @@ class StageBPlanner:
             started = perf_counter()
             raw_content = self._invoke_once(
                 text=text,
-                system_date=system_date,
+                system_datetime=system_datetime,
                 timezone=timezone,
                 previous_validation_errors=feedback or None,
                 surface_hint=surface_hint,
@@ -81,6 +82,7 @@ class StageBPlanner:
             previous_raw = raw_content
             try:
                 payload = json.loads(raw_content)
+                payload = _apply_semantic_payload_guards(payload)
                 parsed = StageBOutput.model_validate(payload)
             except json.JSONDecodeError as exc:
                 feedback = [f"Stage B JSON decode error: {exc}"]
@@ -141,7 +143,7 @@ class StageBPlanner:
         self,
         requests: Iterable[StageBRequest],
         *,
-        system_date: str,
+        system_datetime: str,
         timezone: str,
         max_concurrent: int = 10,
     ) -> list[StageBOutput]:
@@ -152,7 +154,7 @@ class StageBPlanner:
                     self.run_stage_b,
                     unit_id=request.unit_id,
                     text=request.text,
-                    system_date=system_date,
+                    system_datetime=system_datetime,
                     timezone=timezone,
                     surface_hint=request.surface_hint,
                 )
@@ -164,7 +166,7 @@ class StageBPlanner:
         self,
         *,
         text: str,
-        system_date: str,
+        system_datetime: str,
         timezone: str,
         previous_validation_errors: list[str] | None,
         surface_hint: str | None,
@@ -172,7 +174,7 @@ class StageBPlanner:
         response = self._text_runner.invoke(
             build_stage_b_messages(
                 text=text,
-                system_date=system_date,
+                system_datetime=system_datetime,
                 timezone=timezone,
                 previous_validation_errors=previous_validation_errors,
                 surface_hint=surface_hint,
@@ -189,7 +191,7 @@ def run_stage_b(
     text_runner: Any,
     unit_id: str,
     text: str,
-    system_date: str,
+    system_datetime: str,
     timezone: str,
     previous_validation_errors: list[str] | None = None,
     surface_hint: str | None = None,
@@ -199,7 +201,7 @@ def run_stage_b(
     return planner.run_stage_b(
         unit_id=unit_id,
         text=text,
-        system_date=system_date,
+        system_datetime=system_datetime,
         timezone=timezone,
         previous_validation_errors=previous_validation_errors,
         surface_hint=surface_hint,
@@ -210,7 +212,7 @@ def run_stage_b_batch(
     *,
     text_runner: Any,
     requests: Iterable[StageBRequest],
-    system_date: str,
+    system_datetime: str,
     timezone: str,
     max_concurrent: int = 10,
     pipeline_logging_enabled: bool = False,
@@ -218,7 +220,7 @@ def run_stage_b_batch(
     planner = StageBPlanner(text_runner=text_runner, pipeline_logging_enabled=pipeline_logging_enabled)
     return planner.run_stage_b_batch(
         requests,
-        system_date=system_date,
+        system_datetime=system_datetime,
         timezone=timezone,
         max_concurrent=max_concurrent,
     )
@@ -280,3 +282,84 @@ def _validate_holiday_event_selectors(output: StageBOutput) -> None:
         raise ValueError("holiday_event_collection only supports scope='consecutive_rest'")
     if anchor.selector != "all":
         raise ValueError("holiday_event_collection selector must be 'all'")
+
+
+def _apply_semantic_payload_guards(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    carrier = payload.get("carrier")
+    if not isinstance(carrier, dict):
+        return payload
+    anchor = carrier.get("anchor")
+    if not isinstance(anchor, dict):
+        return payload
+
+    if anchor.get("kind") == "datetime_range":
+        start = _parse_hour_aligned_datetime(anchor.get("start_datetime"))
+        end = _parse_hour_aligned_datetime(anchor.get("end_datetime"))
+        if start is not None and end is not None and start > end:
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "semantic_conflict"}
+
+    if anchor.get("kind") == "mapped_range" and anchor.get("mode") == "bounded_pair":
+        if not _raw_bounded_pair_endpoint_supported(anchor.get("start")) or not _raw_bounded_pair_endpoint_supported(anchor.get("end")):
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
+        start_precision = _raw_bounded_pair_precision(anchor.get("start"))
+        end_expr = anchor.get("end")
+        end_precision = start_precision if _raw_current_time_endpoint(end_expr) else _raw_bounded_pair_precision(end_expr)
+        if start_precision is not None and end_precision is not None and start_precision != end_precision:
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
+    return payload
+
+
+def _parse_hour_aligned_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _raw_current_time_endpoint(expr: object) -> bool:
+    if expr == "system_datetime":
+        return True
+    if not isinstance(expr, dict):
+        return False
+    return expr.get("kind") == "relative_window" and expr.get("grain") in {"day", "hour"} and expr.get("offset_units") == 0
+
+
+def _raw_bounded_pair_precision(expr: object) -> str | None:
+    if expr == "system_datetime":
+        return "day"
+    if not isinstance(expr, dict):
+        return None
+    kind = expr.get("kind")
+    if kind == "datetime_range":
+        return "hour"
+    if kind == "relative_window":
+        return "hour" if expr.get("grain") == "hour" else "day"
+    if kind == "rolling_window":
+        return "hour" if expr.get("unit") == "hour" else "day"
+    if kind == "enumeration_set":
+        member_precisions = {_raw_bounded_pair_precision(member) for member in expr.get("members", [])}
+        member_precisions.discard(None)
+        if len(member_precisions) == 1:
+            return member_precisions.pop()
+        return None
+    return "day"
+
+
+def _raw_bounded_pair_endpoint_supported(expr: object) -> bool:
+    if expr == "system_datetime":
+        return True
+    if not isinstance(expr, dict):
+        return False
+    kind = expr.get("kind")
+    if kind in {"named_period", "date_range", "datetime_range"}:
+        return True
+    if kind == "relative_window":
+        return expr.get("grain") in {"day", "hour"} and expr.get("offset_units") == 0
+    if kind == "enumeration_set":
+        members = expr.get("members", [])
+        return bool(members) and all(_raw_bounded_pair_endpoint_supported(member) for member in members)
+    return False

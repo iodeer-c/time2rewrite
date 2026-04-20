@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineRequest(BaseModel):
     query: str
-    system_date: str | None = None
-    system_datetime: str | None = None
+    system_datetime: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
     timezone: str = Field(default="Asia/Shanghai")
     rewrite: bool = False
 
@@ -45,7 +44,6 @@ def pipeline_query(request: PipelineRequest) -> dict:
     try:
         return query_service.process_query(
             query=request.query,
-            system_date=request.system_date,
             system_datetime=request.system_datetime,
             timezone=request.timezone,
             rewrite=request.rewrite,
