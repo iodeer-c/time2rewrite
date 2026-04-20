@@ -5,8 +5,10 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from time_query_service.config import load_business_calendar_event_aliases
 
-STAGE_B_SYSTEM_PROMPT = """
+
+_STAGE_B_SYSTEM_PROMPT_TEMPLATE = """
 你是 Stage B 时间结构化器。
 
 输入只包含一个 self_contained_text 的时间片段，以及 system_date / timezone / surface_hint / previous_validation_errors。
@@ -24,12 +26,21 @@ STAGE_B_SYSTEM_PROMPT = """
 - 节假日事件如果没有显式年份，`schedule_year_ref` 必须直接使用 `{"year": system_date.year}`；不要输出当前实现未支持的 `source_unit_id`
 - `本月至今 / 本季度至今 / 本年至今` 这类 to_date 语义，必须建模为 `mapped_range(mode="period_to_date")`
 - `2025年每天` 这种 day-grain child expansion，保持 `named_period + grain_expansion(day)`，不要改写成 `grouped_temporal_value`
+- `上周二 / 本周五 / 下周一` 这类“相对周里的星期几”，建模为 `grouped_temporal_value(parent=relative_window(week), child_grain="day", selector="all") + member_selection(nth)`；星期一到星期日分别对应 n=1..7
+- `今年第一天 / 今年第一个工作日 / 今年第一个假期 / 今年第一个季度 / 今年第二个季度 / 今年前3个工作日` 这类 selector family，统一建模为“连续自然周期 parent + 过滤/展开 + member_selection”：
+  - `第一天` -> `relative_window(year) + grain_expansion(day) + member_selection(first)`
+  - `第一个工作日` -> `relative_window(year) + calendar_filter(workday) + member_selection(first)`
+  - `第一个假期` -> `relative_window(year) + calendar_filter(holiday) + member_selection(first)`；这里“假期”按 holiday day-class 的自然日解释，不按假期事件 span 解释
+  - `第一个/第二个季度` -> `grouped_temporal_value(parent=relative_window(year), child_grain="quarter", selector="all") + member_selection(first/nth)`
+  - `前3个工作日` -> `relative_window(year) + calendar_filter(workday) + member_selection(first_n, n=3)`
 - 显式 bounded range（例如 `2025年9月到12月`、`去年12月到3月`、`2025年Q3到10月`、`2025年9月到10月15日`）必须输出一个单 carrier，不能拆成两个 standalone endpoint carriers。
 - 如果 bounded range 两端都是显式日级日期，使用 `date_range`。
 - 如果 bounded range 至少一端是自然周期边界，使用 `mapped_range(mode="bounded_pair")`，`start` 和 `end` 必须直接放 canonical endpoint anchors。
 - 对于右边界缺少年份的 bounded range，必须做最小非倒退补全：先继承左边界年份；如果会倒退，再把右边界滚到下一个最小自然周期。例如 `去年12月到3月` 的右边界必须是 `2026年3月`。
 - `mapped_range(mode="bounded_pair")` 在这期只允许自然周期/日级端点；如果端点涉及 `calendar_event`、rolling 或 calendar-class 语义，必须 degrade 为 `unsupported_anchor_semantics`。
 - 如果 bounded range 还带有 grouped / filter scaffold（例如 `2025年1月到3月每个月的每个工作日`），必须先建一个单 bounded-range parent，再把 grouped/filter 语义挂在这个 parent 上；不能先拆成两个端点 carrier。
+- 节假日事件必须使用当前 schema 的英文 canonical key，不能自造拼音 key。当前俗称与 canonical key 的映射如下：
+__CALENDAR_EVENT_ALIAS_CATALOG__
 """.strip()
 
 
@@ -63,6 +74,22 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
                     "mode": "bounded_pair",
                     "start": {"kind": "named_period", "period_type": "month", "year": 2025, "month": 12},
                     "end": {"kind": "named_period", "period_type": "month", "year": 2026, "month": 3},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "2024年元旦", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "calendar_event",
+                    "region": "CN",
+                    "event_key": "new_year",
+                    "schedule_year_ref": {"year": 2024},
+                    "scope": "statutory",
                 },
                 "modifiers": [],
             },
@@ -130,6 +157,91 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
     ({"text": "最近1个周末", "system_date": "2026-04-17", "timezone": "Asia/Shanghai", "surface_hint": "calendar_grain_rolling"}, {"carrier": {"anchor": {"kind": "rolling_by_calendar_unit", "length": 1, "day_class": "weekend", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近1个补班日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai", "surface_hint": "calendar_grain_rolling"}, {"carrier": {"anchor": {"kind": "rolling_by_calendar_unit", "length": 1, "day_class": "makeup_workday", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "本月工作日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "relative_window", "grain": "month", "offset_units": 0}, "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}]}, "needs_clarification": False}),
+    (
+        {"text": "上周二", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "grouped_temporal_value",
+                    "parent": {"kind": "relative_window", "grain": "week", "offset_units": -1},
+                    "child_grain": "day",
+                    "selector": "all",
+                },
+                "modifiers": [{"kind": "member_selection", "selector": "nth", "n": 2}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年第一天", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                "modifiers": [{"kind": "grain_expansion", "target_grain": "day"}, {"kind": "member_selection", "selector": "first"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年第一个工作日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}, {"kind": "member_selection", "selector": "first"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年第一个假期", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                "modifiers": [{"kind": "calendar_filter", "day_class": "holiday"}, {"kind": "member_selection", "selector": "first"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年第一个季度", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "grouped_temporal_value",
+                    "parent": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                    "child_grain": "quarter",
+                    "selector": "all",
+                },
+                "modifiers": [{"kind": "member_selection", "selector": "first"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年第二个季度", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "grouped_temporal_value",
+                    "parent": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                    "child_grain": "quarter",
+                    "selector": "all",
+                },
+                "modifiers": [{"kind": "member_selection", "selector": "nth", "n": 2}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "今年前3个工作日", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "relative_window", "grain": "year", "offset_units": 0},
+                "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}, {"kind": "member_selection", "selector": "first_n", "n": 3}],
+            },
+            "needs_clarification": False,
+        },
+    ),
     ({"text": "清明假期", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "calendar_event", "region": "CN", "event_key": "qingming", "schedule_year_ref": {"year": 2026}, "scope": "consecutive_rest"}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "2025年3月和5月", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "enumeration_set", "grain": "month", "members": [{"kind": "named_period", "period_type": "month", "year": 2025, "month": 3}, {"kind": "named_period", "period_type": "month", "year": 2025, "month": 5}]}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "2025年每个季度", "system_date": "2026-04-17", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "grouped_temporal_value", "parent": {"kind": "named_period", "period_type": "year", "year": 2025}, "child_grain": "quarter", "selector": "all"}, "modifiers": []}, "needs_clarification": False}),
@@ -147,6 +259,21 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
 ]
 
 
+def _build_calendar_event_alias_catalog_text() -> str:
+    alias_map = load_business_calendar_event_aliases(region="CN")
+    lines: list[str] = []
+    for canonical_key, aliases in alias_map.items():
+        alias_text = " / ".join(aliases)
+        lines.append(f"- {alias_text} -> {canonical_key}")
+    return "\n".join(lines)
+
+
+def _build_stage_b_system_prompt() -> str:
+    return _STAGE_B_SYSTEM_PROMPT_TEMPLATE.replace(
+        "__CALENDAR_EVENT_ALIAS_CATALOG__", _build_calendar_event_alias_catalog_text()
+    )
+
+
 def build_stage_b_messages(
     *,
     text: str,
@@ -155,7 +282,7 @@ def build_stage_b_messages(
     previous_validation_errors: list[str] | None = None,
     surface_hint: str | None = None,
 ) -> list[Any]:
-    messages: list[Any] = [SystemMessage(content=STAGE_B_SYSTEM_PROMPT)]
+    messages: list[Any] = [SystemMessage(content=_build_stage_b_system_prompt())]
     for request_payload, response_payload in _FEW_SHOTS:
         messages.append(HumanMessage(content=json.dumps(request_payload, ensure_ascii=False, indent=2)))
         messages.append(AIMessage(content=json.dumps(response_payload, ensure_ascii=False, indent=2)))

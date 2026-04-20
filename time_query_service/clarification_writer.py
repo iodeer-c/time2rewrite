@@ -12,6 +12,7 @@ from time_query_service.time_plan import CalendarFilter, GrainExpansion, Grouped
 
 
 ClarificationStatus = Literal["resolved", "unresolved"]
+MAX_INLINE_FILTERED_MEMBER_COUNT = 31
 
 
 class ClarificationFact(StrictModel):
@@ -282,7 +283,9 @@ def _is_valid_clarified_query(
 
 def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) -> str | None:
     if tree.role == "grouped_member" and grouping_grain is not None:
-        member_texts = _member_interval_texts(tree)
+        member_texts = _member_interval_texts(tree, require_children=True)
+        if len(member_texts) == 1:
+            return None
         if member_texts:
             return f"按{_grouping_phrase(grouping_grain)}分组，依次为{'、'.join(member_texts)}"
         return f"按{_grouping_phrase(grouping_grain)}分组"
@@ -290,7 +293,11 @@ def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) 
     day_class = _day_class_for_unit(unit)
     if tree.role == "filtered_collection" and day_class is not None:
         member_texts = _member_interval_texts(tree)
-        if member_texts and _should_list_filtered_members(unit):
+        if len(member_texts) == 1:
+            return None
+        if member_texts and _should_list_filtered_members(unit, member_count=len(member_texts)):
+            if grouping_grain is not None:
+                return f"按{_grouping_phrase(grouping_grain)}分组，依次为{'、'.join(member_texts)}"
             return f"依次为{'、'.join(member_texts)}"
         if unit.content.content_kind == "standalone" and unit.content.carrier is not None:
             anchor = unit.content.carrier.anchor
@@ -298,18 +305,22 @@ def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) 
                 if member_texts:
                     return f"依次为{'、'.join(member_texts)}"
                 return None
+        if grouping_grain is not None:
+            return f"按{_grouping_phrase(grouping_grain)}分组，范围内的全部{_day_class_phrase(day_class)}"
         return f"范围内的全部{_day_class_phrase(day_class)}"
 
     return None
 
 
-def _member_interval_texts(tree: IntervalTree) -> list[str]:
+def _member_interval_texts(tree: IntervalTree, *, require_children: bool = False) -> list[str]:
     if tree.children:
         return [
             _format_interval(child.labels.absolute_core_time)
             for child in tree.children
             if child.labels.absolute_core_time is not None
         ]
+    if require_children:
+        return []
     return [_format_interval(interval) for interval in tree.intervals]
 
 
@@ -335,9 +346,11 @@ def _day_class_phrase(day_class: str) -> str:
     return mapping.get(day_class, day_class)
 
 
-def _should_list_filtered_members(unit) -> bool:
+def _should_list_filtered_members(unit, *, member_count: int) -> bool:
     label = unit.render_text
-    return "每个" in label or "每天" in label
+    if "每个" in label or "每天" in label:
+        return True
+    return member_count <= MAX_INLINE_FILTERED_MEMBER_COUNT
 
 
 def _coalesce_split_range_facts(

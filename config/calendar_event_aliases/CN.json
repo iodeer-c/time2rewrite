@@ -1,0 +1,12 @@
+{
+  "region": "CN",
+  "canonical_event_aliases": {
+    "new_year": ["元旦", "新年", "元旦节"],
+    "spring_festival": ["春节", "过年", "新春"],
+    "qingming": ["清明", "清明节"],
+    "labor_day": ["劳动节", "五一", "五一劳动节"],
+    "dragon_boat": ["端午", "端午节"],
+    "mid_autumn": ["中秋", "中秋节"],
+    "national_day": ["国庆", "国庆节", "十一", "十一国庆"]
+  }
+}

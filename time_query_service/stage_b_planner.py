@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from pydantic import ValidationError
 
+from time_query_service.config import load_business_calendar_event_aliases
 from time_query_service.pipeline_logging import log_pipeline_event
 from time_query_service.post_processor import StageBOutput
 from time_query_service.stage_b_prompt import build_stage_b_messages
@@ -34,6 +35,8 @@ class StageBPlanner:
     def __init__(self, *, text_runner: Any, pipeline_logging_enabled: bool = False) -> None:
         self._text_runner = text_runner
         self._pipeline_logging_enabled = pipeline_logging_enabled
+        self._calendar_event_aliases = load_business_calendar_event_aliases(region="CN")
+        self._canonical_calendar_event_keys = frozenset(self._calendar_event_aliases)
 
     def run_stage_b(
         self,
@@ -86,6 +89,26 @@ class StageBPlanner:
                 feedback = [f"Stage B schema validation error: {exc}"]
                 error_kind = "schema_validation_error"
             else:
+                try:
+                    _validate_calendar_event_keys(parsed, valid_keys=self._canonical_calendar_event_keys)
+                except ValueError as exc:
+                    feedback = [f"Stage B semantic validation error: {exc}"]
+                    error_kind = "semantic_validation_error"
+                else:
+                    log_pipeline_event(
+                        "stage_b",
+                        "stage_b_attempt",
+                        {
+                            "unit_id": unit_id,
+                            "attempt_no": attempt,
+                            "duration_ms": duration_ms,
+                            "success": True,
+                            "error_kind": None,
+                        },
+                        enabled=self._pipeline_logging_enabled,
+                    )
+                    return parsed
+
                 log_pipeline_event(
                     "stage_b",
                     "stage_b_attempt",
@@ -93,12 +116,11 @@ class StageBPlanner:
                         "unit_id": unit_id,
                         "attempt_no": attempt,
                         "duration_ms": duration_ms,
-                        "success": True,
-                        "error_kind": None,
+                        "success": False,
+                        "error_kind": error_kind,
                     },
                     enabled=self._pipeline_logging_enabled,
                 )
-                return parsed
 
             log_pipeline_event(
                 "stage_b",
@@ -211,3 +233,35 @@ def _maybe_degrade_calendar_grain_rolling(*, text: str, surface_hint: str | None
     if token in _SUPPORTED_DAY_CLASS:
         return None
     return StageBOutput(carrier=None, needs_clarification=True, reason_kind="unsupported_calendar_grain_rolling")
+
+
+def _validate_calendar_event_keys(output: StageBOutput, *, valid_keys: frozenset[str]) -> None:
+    if output.carrier is None:
+        return
+    for event_key in _iter_calendar_event_keys(output.carrier.anchor):
+        if event_key not in valid_keys:
+            raise ValueError(f"unsupported calendar event key {event_key!r}")
+
+
+def _iter_calendar_event_keys(anchor: Any | None) -> list[str]:
+    if anchor is None:
+        return []
+
+    kind = getattr(anchor, "kind", None)
+    if kind == "calendar_event":
+        return [anchor.event_key]
+    if kind == "enumeration_set":
+        keys: list[str] = []
+        for member in anchor.members:
+            keys.extend(_iter_calendar_event_keys(member))
+        return keys
+    if kind == "grouped_temporal_value":
+        return _iter_calendar_event_keys(anchor.parent)
+    if kind == "mapped_range":
+        keys: list[str] = []
+        keys.extend(_iter_calendar_event_keys(getattr(anchor, "start", None)))
+        keys.extend(_iter_calendar_event_keys(getattr(anchor, "end", None)))
+        keys.extend(_iter_calendar_event_keys(getattr(anchor, "anchor_ref", None)))
+        keys.extend(_iter_calendar_event_keys(getattr(anchor, "endpoint_set", None)))
+        return keys
+    return []
