@@ -38,6 +38,15 @@ _STAGE_B_SYSTEM_PROMPT_TEMPLATE = """
 - 对于只有左端显式日期词、右端是裸小时的 hour range，先继承左端日期；若 `end < start`，则把右端顺延到次日
 - 如果 hour range 两端都显式写死且仍然倒退，例如 `今天23点到今天2点`，必须 degrade 为 `semantic_conflict`
 - `今天下午`、`14:30`、`今天到14点`、`今天+3小时前` 这类 hour v1 不支持的表达必须 degrade 为 `unsupported_anchor_semantics`
+- `最近/过去/近 + N天|周|月|季度|半年|年` 统一视为同一家 rolling family；词面本身不决定是否到今天或昨天，planner 一律输出 `endpoint="today"`，后续 endpoint policy 由下游确定性层处理
+- rolling family 的 canonical shape 必须唯一：
+  - 纯 rolling -> `rolling_window` 或 `rolling_by_calendar_unit`
+  - rolling + `每天` -> 保持 `rolling_window(...) + grain_expansion(day)`
+  - rolling + 非 day 子粒度（`每周/每月/每季度/每半年/每年`）-> `grouped_temporal_value(parent=rolling_window(...), child_grain=..., selector="all")`
+  - rolling + `calendar_filter` / `member_selection` -> 作为 trailing modifiers 挂在 canonical 主链后，不要改写进 anchor
+- 例如：
+  - `过去半年每月的每个工作日` -> `grouped_temporal_value(parent=rolling_window(unit="half_year"), child_grain="month", selector="all") + calendar_filter(workday)`
+  - `最近一个季度每天的第一个工作日` -> `rolling_window(unit="quarter") + grain_expansion(day) + calendar_filter(workday) + member_selection(first)`
 - `2025年每天` 这种 day-grain child expansion，保持 `named_period + grain_expansion(day)`，不要改写成 `grouped_temporal_value`
 - `上周二 / 本周五 / 下周一` 这类“相对周里的星期几”，建模为 `grouped_temporal_value(parent=relative_window(week), child_grain="day", selector="all") + member_selection(nth)`；星期一到星期日分别对应 n=1..7
 - `今年第一天 / 今年第一个工作日 / 今年第一个假期 / 今年最后一个假期 / 今年第二个假期 / 今年前两个假期 / 今年第一个季度 / 今年第二个季度 / 今年前3个工作日` 这类 selector family，统一建模为“连续自然周期 parent + 过滤/展开/事件集合 + member_selection”：
@@ -403,11 +412,54 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {"text": "14:30", "system_datetime": "2026-04-17T14:37:00", "timezone": "Asia/Shanghai"},
         {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"},
     ),
+    ({"text": "过去七天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 7, "unit": "day", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
+    ({"text": "近7天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 7, "unit": "day", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一周", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "week", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一个月", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "month", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一季度", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "quarter", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
+    ({"text": "过去一个季度", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "quarter", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近半年", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "half_year", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
+    ({"text": "过去半年", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "half_year", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近一年", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 1, "unit": "year", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
+    (
+        {"text": "过去半年每月的每个工作日", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "grouped_temporal_value",
+                    "parent": {"kind": "rolling_window", "length": 1, "unit": "half_year", "endpoint": "today", "include_endpoint": True},
+                    "child_grain": "month",
+                    "selector": "all",
+                },
+                "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "最近一个季度每天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "rolling_window", "length": 1, "unit": "quarter", "endpoint": "today", "include_endpoint": True},
+                "modifiers": [{"kind": "grain_expansion", "target_grain": "day"}],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "最近一个季度每天的第一个工作日", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {"kind": "rolling_window", "length": 1, "unit": "quarter", "endpoint": "today", "include_endpoint": True},
+                "modifiers": [
+                    {"kind": "grain_expansion", "target_grain": "day"},
+                    {"kind": "calendar_filter", "day_class": "workday"},
+                    {"kind": "member_selection", "selector": "first"},
+                ],
+            },
+            "needs_clarification": False,
+        },
+    ),
     ({"text": "最近5天中的工作日", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "rolling_window", "length": 5, "unit": "day", "endpoint": "today", "include_endpoint": True}, "modifiers": [{"kind": "calendar_filter", "day_class": "workday"}]}, "needs_clarification": False}),
     ({"text": "最近5个工作日", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai", "surface_hint": "calendar_grain_rolling"}, {"carrier": {"anchor": {"kind": "rolling_by_calendar_unit", "length": 5, "day_class": "workday", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),
     ({"text": "最近3个节假日", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai", "surface_hint": "calendar_grain_rolling"}, {"carrier": {"anchor": {"kind": "rolling_by_calendar_unit", "length": 3, "day_class": "statutory_holiday", "endpoint": "today", "include_endpoint": True}, "modifiers": []}, "needs_clarification": False}),

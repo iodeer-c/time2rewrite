@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ class PipelineRequest(BaseModel):
     system_datetime: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
     timezone: str = Field(default="Asia/Shanghai")
     rewrite: bool = False
+    default_rolling_endpoint: Literal["today", "yesterday"] = "today"
 
 
 def _load_business_calendar() -> JsonBusinessCalendar | None:
@@ -47,6 +49,7 @@ def pipeline_query(request: PipelineRequest) -> dict:
             system_datetime=request.system_datetime,
             timezone=request.timezone,
             rewrite=request.rewrite,
+            default_rolling_endpoint=request.default_rolling_endpoint,
         )
     except PostProcessorValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

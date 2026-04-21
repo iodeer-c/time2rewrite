@@ -26,6 +26,7 @@ from time_query_service.time_plan import (
     DateRange,
     DatetimeRange,
     DerivationSource,
+    DefaultRollingEndpoint,
     EnumerationSet,
     GrainExpansion,
     GroupedTemporalValue,
@@ -117,13 +118,22 @@ class PostProcessorValidationError(Exception):
 def assemble_time_plan(
     stage_a_output: StageAOutput | dict[str, Any] | str,
     stage_b_outputs_by_unit: dict[str, StageBOutput | dict[str, Any] | str],
+    *,
+    default_rolling_endpoint: DefaultRollingEndpoint = "today",
 ) -> TimePlan:
     try:
         stage_a = _parse_stage_a(stage_a_output)
         stage_b = {key: _parse_stage_b(key, value) for key, value in stage_b_outputs_by_unit.items()}
+        stage_b = _normalize_default_rolling_endpoints(stage_b, allowed_endpoint=default_rolling_endpoint)
 
         unit_ids, lookup_by_original = _allocate_unit_ids(stage_a.units)
-        _validate_layer3(stage_a.query, stage_a.units, stage_b, system_datetime=stage_a.system_datetime)
+        _validate_layer3(
+            stage_a.query,
+            stage_a.units,
+            stage_b,
+            system_datetime=stage_a.system_datetime,
+            allowed_endpoint=default_rolling_endpoint,
+        )
         canonical_stage_b = _canonicalize_stage_b(stage_b)
         units = [
             _assemble_unit(
@@ -142,6 +152,7 @@ def assemble_time_plan(
             query=stage_a.query,
             system_datetime=stage_a.system_datetime,
             timezone=stage_a.timezone,
+            default_rolling_endpoint=default_rolling_endpoint,
             units=units,
             comparisons=comparisons,
         )
@@ -151,7 +162,12 @@ def assemble_time_plan(
         log_pipeline_event(
             "post_processor",
             "post_processor_validation",
-            {"layer": 4, "outcome": "success", "details": "assembled_time_plan"},
+            {
+                "layer": 4,
+                "outcome": "success",
+                "details": "assembled_time_plan",
+                "allowed_endpoint": default_rolling_endpoint,
+            },
             enabled=True,
         )
         return plan
@@ -159,7 +175,14 @@ def assemble_time_plan(
         log_pipeline_event(
             "post_processor",
             "post_processor_validation",
-            {"layer": exc.layer, "outcome": "failure", "details": exc.details, "unit_id": exc.unit_id, "stage": exc.stage},
+            {
+                "layer": exc.layer,
+                "outcome": "failure",
+                "details": exc.details,
+                "unit_id": exc.unit_id,
+                "stage": exc.stage,
+                "allowed_endpoint": default_rolling_endpoint,
+            },
             enabled=True,
         )
         raise
@@ -282,6 +305,7 @@ def _validate_layer3(
     stage_b: dict[str, StageBOutput],
     *,
     system_datetime: datetime,
+    allowed_endpoint: DefaultRollingEndpoint,
 ) -> None:
     for index, unit in enumerate(units):
         if unit.content_kind == "standalone":
@@ -306,6 +330,7 @@ def _validate_layer3(
                     stage_b_output.carrier,
                     unit_id=unit.unit_id or f"__index_{index}__",
                     system_datetime=system_datetime,
+                    allowed_endpoint=allowed_endpoint,
                 )
         elif unit.content_kind == "derived" and not unit.sources:
             raise PostProcessorValidationError(
@@ -449,6 +474,7 @@ def _validate_carrier_semantics(
     *,
     unit_id: str,
     system_datetime: datetime,
+    allowed_endpoint: DefaultRollingEndpoint,
 ) -> None:
     _validate_non_head_non_day_grain_expansion(carrier, unit_id=unit_id)
     _validate_hour_modifier_topology(carrier, unit_id=unit_id)
@@ -483,12 +509,14 @@ def _validate_carrier_semantics(
                 unit_id=unit_id,
                 details="GroupedTemporalValue parent must be strictly coarser than child_grain",
             )
+        if isinstance(anchor.parent, RollingWindow):
+            _validate_frozen_rolling_window(anchor.parent, allowed_endpoint=allowed_endpoint, unit_id=unit_id)
     elif isinstance(anchor, EnumerationSet):
         _validate_enumeration_set(anchor, unit_id=unit_id)
     elif isinstance(anchor, RollingWindow):
-        _validate_frozen_rolling_window(anchor, unit_id=unit_id)
+        _validate_frozen_rolling_window(anchor, allowed_endpoint=allowed_endpoint, unit_id=unit_id)
     elif isinstance(anchor, RollingByCalendarUnit):
-        _validate_frozen_rolling_by_calendar(anchor, unit_id=unit_id)
+        _validate_frozen_rolling_by_calendar(anchor, allowed_endpoint=allowed_endpoint, unit_id=unit_id)
     elif isinstance(anchor, MappedRange):
         _validate_mapped_range_semantics(anchor, unit_id=unit_id, system_datetime=system_datetime)
 
@@ -821,13 +849,19 @@ def _interval_ranges_overlap(left: tuple[date, date], right: tuple[date, date]) 
     return left[0] <= right[1] and right[0] <= left[1]
 
 
-def _validate_frozen_rolling_window(anchor: RollingWindow, *, unit_id: str) -> None:
-    if anchor.endpoint != "today":
+def _validate_frozen_rolling_window(
+    anchor: RollingWindow,
+    *,
+    allowed_endpoint: DefaultRollingEndpoint,
+    unit_id: str,
+) -> None:
+    expected_endpoint = "today" if anchor.unit == "hour" else allowed_endpoint
+    if anchor.endpoint != expected_endpoint:
         raise PostProcessorValidationError(
             layer=3,
             stage="post_processor",
             unit_id=unit_id,
-            details="frozen v1 rolling parameter endpoint must stay today",
+            details=f"frozen v1 rolling parameter endpoint must stay {expected_endpoint}",
         )
     if anchor.include_endpoint is not True:
         raise PostProcessorValidationError(
@@ -838,13 +872,18 @@ def _validate_frozen_rolling_window(anchor: RollingWindow, *, unit_id: str) -> N
         )
 
 
-def _validate_frozen_rolling_by_calendar(anchor: RollingByCalendarUnit, *, unit_id: str) -> None:
-    if anchor.endpoint != "today":
+def _validate_frozen_rolling_by_calendar(
+    anchor: RollingByCalendarUnit,
+    *,
+    allowed_endpoint: DefaultRollingEndpoint,
+    unit_id: str,
+) -> None:
+    if anchor.endpoint != allowed_endpoint:
         raise PostProcessorValidationError(
             layer=3,
             stage="post_processor",
             unit_id=unit_id,
-            details="frozen v1 rolling parameter endpoint must stay today",
+            details=f"frozen v1 rolling parameter endpoint must stay {allowed_endpoint}",
         )
     if anchor.include_endpoint is not True:
         raise PostProcessorValidationError(
@@ -853,6 +892,58 @@ def _validate_frozen_rolling_by_calendar(anchor: RollingByCalendarUnit, *, unit_
             unit_id=unit_id,
             details="frozen v1 rolling parameter include_endpoint must stay true",
         )
+
+
+def _normalize_default_rolling_endpoints(
+    stage_b: dict[str, StageBOutput],
+    *,
+    allowed_endpoint: DefaultRollingEndpoint,
+) -> dict[str, StageBOutput]:
+    if allowed_endpoint == "today":
+        return stage_b
+
+    normalized: dict[str, StageBOutput] = {}
+    for unit_id, output in stage_b.items():
+        if output.needs_clarification or output.carrier is None:
+            normalized[unit_id] = output
+            continue
+
+        rewritten = output.model_copy(deep=True)
+        assert rewritten.carrier is not None
+        if _rewrite_default_rolling_endpoint_in_carrier(rewritten.carrier, allowed_endpoint=allowed_endpoint):
+            normalized[unit_id] = rewritten
+            continue
+
+        normalized[unit_id] = output
+    return normalized
+
+
+def _rewrite_default_rolling_endpoint_in_carrier(
+    carrier: Carrier,
+    *,
+    allowed_endpoint: DefaultRollingEndpoint,
+) -> bool:
+    return _rewrite_default_rolling_endpoint_in_anchor(carrier.anchor, allowed_endpoint=allowed_endpoint)
+
+
+def _rewrite_default_rolling_endpoint_in_anchor(
+    anchor: Anchor,
+    *,
+    allowed_endpoint: DefaultRollingEndpoint,
+) -> bool:
+    if isinstance(anchor, RollingWindow):
+        if anchor.unit != "hour" and anchor.endpoint == "today":
+            anchor.endpoint = allowed_endpoint
+            return True
+        return False
+    if isinstance(anchor, RollingByCalendarUnit):
+        if anchor.endpoint == "today":
+            anchor.endpoint = allowed_endpoint
+            return True
+        return False
+    if isinstance(anchor, GroupedTemporalValue):
+        return _rewrite_default_rolling_endpoint_in_anchor(anchor.parent, allowed_endpoint=allowed_endpoint)
+    return False
 
 
 def _canonicalize_stage_b(stage_b: dict[str, StageBOutput]) -> dict[str, StageBOutput]:

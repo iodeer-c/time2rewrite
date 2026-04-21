@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.clarification_writer import build_clarification_facts, render_clarified_query
@@ -90,6 +90,7 @@ class QueryPipelineService:
         system_datetime: str | None = None,
         timezone: str = "Asia/Shanghai",
         rewrite: bool = False,
+        default_rolling_endpoint: Literal["today", "yesterday"] = "today",
     ) -> dict[str, Any]:
         if self._business_calendar is None:
             raise ValueError("business_calendar is required for the new pipeline")
@@ -106,6 +107,7 @@ class QueryPipelineService:
                 "system_datetime": system_datetime,
                 "timezone": timezone,
                 "rewrite": rewrite,
+                "default_rolling_endpoint": default_rolling_endpoint,
             },
             enabled=pipeline_logging_enabled,
         )
@@ -145,7 +147,11 @@ class QueryPipelineService:
             for request, output in zip(stage_b_requests, stage_b_outputs, strict=True)
         }
 
-        time_plan = assemble_time_plan(stage_a, stage_b_by_unit)
+        time_plan = assemble_time_plan(
+            stage_a,
+            stage_b_by_unit,
+            default_rolling_endpoint=default_rolling_endpoint,
+        )
         resolved_plan = resolve_plan(
             time_plan,
             business_calendar=self._business_calendar,

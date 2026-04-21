@@ -168,6 +168,7 @@ def evaluate_layer1_golden(
                     request.unit_id: output
                     for request, output in zip(requests, stage_b_outputs, strict=True)
                 },
+                default_rolling_endpoint="today",
             )
             resolved_plan = resolve_plan(
                 time_plan,

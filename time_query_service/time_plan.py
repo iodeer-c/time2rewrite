@@ -19,6 +19,7 @@ PreResolverReasonKind = Literal[
 ]
 PeriodType = Literal["year", "quarter", "half_year", "month", "week", "day"]
 RollingEndpoint = Literal["today", "yesterday", "this_month_end", "previous_complete"]
+DefaultRollingEndpoint = Literal["today", "yesterday"]
 DayClass = Literal["workday", "weekend", "holiday", "statutory_holiday", "makeup_workday"]
 CalendarEventScope = Literal["statutory", "consecutive_rest"]
 MappedRangeMode = Literal["bounded_pair", "period_to_date", "rolling_map"]
@@ -358,6 +359,7 @@ class TimePlan(StrictModel):
     query: str
     system_datetime: DateTime
     timezone: str
+    default_rolling_endpoint: DefaultRollingEndpoint = "today"
     units: list[Unit]
     comparisons: list[Comparison] = Field(default_factory=list)
 

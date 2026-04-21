@@ -60,6 +60,7 @@ def _validate_semantics(plan: TimePlan) -> None:
                     unit.content.carrier,
                     unit_id=unit.unit_id,
                     system_datetime=plan.system_datetime,
+                    allowed_endpoint=plan.default_rolling_endpoint,
                 )
         elif not unit.content.sources:
             raise PostProcessorValidationError(
