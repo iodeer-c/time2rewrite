@@ -311,7 +311,7 @@ def _resolve_expression_intervals(
     return [tree.labels.absolute_core_time]
 
 
-def _validate_bounded_pair_expression(expr: Any) -> None:
+def _validate_bounded_pair_expression(expr: Any, *, side: str) -> None:
     if expr is None:
         raise ValueError("mapped_range expression is required")
     if expr == "system_datetime":
@@ -320,11 +320,19 @@ def _validate_bounded_pair_expression(expr: Any) -> None:
     anchor = _coerce_anchor(expr)
     if isinstance(anchor, (NamedPeriod, DateRange, DatetimeRange)):
         return
-    if isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0:
-        return
+    if isinstance(anchor, RelativeWindow):
+        if anchor.grain == "day":
+            if anchor.offset_units == 0:
+                return
+            if anchor.offset_units < 0 and side == "end":
+                return
+            raise NotImplementedError(f"mapped_range bounded_pair does not support {side} relative_window(day,{anchor.offset_units}) endpoint")
+        if anchor.grain == "hour" and anchor.offset_units == 0:
+            return
+        raise NotImplementedError(f"mapped_range bounded_pair does not support {side} relative_window({anchor.grain},{anchor.offset_units}) endpoint")
     if isinstance(anchor, EnumerationSet):
         for member in anchor.members:
-            _validate_bounded_pair_expression(member)
+            _validate_bounded_pair_expression(member, side=side)
         return
     raise NotImplementedError(f"mapped_range bounded_pair does not support endpoint type {type(anchor).__name__}")
 
@@ -403,8 +411,8 @@ def _materialize_mapped_range(
     region: str,
 ) -> IntervalTree:
     if anchor.mode == "bounded_pair":
-        _validate_bounded_pair_expression(anchor.start)
-        _validate_bounded_pair_expression(anchor.end)
+        _validate_bounded_pair_expression(anchor.start, side="start")
+        _validate_bounded_pair_expression(anchor.end, side="end")
         start_intervals = _resolve_expression_intervals(anchor.start, system_datetime, business_calendar, region)
         if _is_current_time_bounded_pair_endpoint(anchor.end):
             end_intervals = [
@@ -415,8 +423,13 @@ def _materialize_mapped_range(
             end_intervals = _resolve_expression_intervals(anchor.end, system_datetime, business_calendar, region)
         if len(start_intervals) != len(end_intervals):
             raise ValueError("mapped_range bounded_pair requires equal start/end cardinality")
+        interval_builder = (
+            _shifted_cutoff_bounded_pair_interval
+            if _is_shifted_day_bounded_pair_endpoint(anchor.end)
+            else _natural_period_bounded_pair_interval
+        )
         ranges = [
-            _bounded_pair_interval(start, end)
+            interval_builder(start, end)
             for start, end in zip(start_intervals, end_intervals, strict=True)
         ]
         return _interval_list_tree(ranges, precision=_bounded_pair_expr_precision(anchor.start))
@@ -549,11 +562,17 @@ def _shift_interval(interval: Interval, value: int, unit: str) -> Interval:
     return Interval(start=start, end=end, end_inclusive=interval.end_inclusive)
 
 
-def _bounded_pair_interval(start: Interval, end: Interval) -> Interval:
+def _natural_period_bounded_pair_interval(start: Interval, end: Interval) -> Interval:
     normalized_end = end
     while normalized_end.end < start.start:
         normalized_end = _shift_interval(normalized_end, 1, "year")
     return Interval(start=start.start, end=normalized_end.end, end_inclusive=True)
+
+
+def _shifted_cutoff_bounded_pair_interval(start: Interval, end: Interval) -> Interval:
+    if end.end < start.start:
+        raise ValueError("semantic_conflict: explicit shifted cutoff end precedes start")
+    return Interval(start=start.start, end=end.end, end_inclusive=True)
 
 
 def _is_current_time_bounded_pair_endpoint(expr: Any) -> bool:
@@ -564,6 +583,14 @@ def _is_current_time_bounded_pair_endpoint(expr: Any) -> bool:
     except Exception:
         return False
     return isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0
+
+
+def _is_shifted_day_bounded_pair_endpoint(expr: Any) -> bool:
+    try:
+        anchor = _coerce_anchor(expr)
+    except Exception:
+        return False
+    return isinstance(anchor, RelativeWindow) and anchor.grain == "day" and anchor.offset_units < 0
 
 
 def _current_time_interval_for_bounded_pair(start_precision: str, system_datetime: datetime) -> Interval:

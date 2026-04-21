@@ -17,6 +17,7 @@ from time_query_service.stage_b_prompt import build_stage_b_messages
 
 
 _CALENDAR_GRAIN_PATTERN = re.compile(r"最近\s*(?P<length>\d+)\s*个(?P<token>工作日|周末|节假日|补班日|休息日)")
+_ZERO_DAY_CUTOFF_PATTERN = re.compile(r"0[天日]前")
 _SUPPORTED_DAY_CLASS = {
     "工作日": "workday",
     "周末": "weekend",
@@ -82,7 +83,7 @@ class StageBPlanner:
             previous_raw = raw_content
             try:
                 payload = json.loads(raw_content)
-                payload = _apply_semantic_payload_guards(payload)
+                payload = _apply_semantic_payload_guards(payload, text=text)
                 parsed = StageBOutput.model_validate(payload)
             except json.JSONDecodeError as exc:
                 feedback = [f"Stage B JSON decode error: {exc}"]
@@ -284,7 +285,7 @@ def _validate_holiday_event_selectors(output: StageBOutput) -> None:
         raise ValueError("holiday_event_collection selector must be 'all'")
 
 
-def _apply_semantic_payload_guards(payload: dict[str, Any]) -> dict[str, Any]:
+def _apply_semantic_payload_guards(payload: dict[str, Any], *, text: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
     carrier = payload.get("carrier")
@@ -301,10 +302,15 @@ def _apply_semantic_payload_guards(payload: dict[str, Any]) -> dict[str, Any]:
             return {"carrier": None, "needs_clarification": True, "reason_kind": "semantic_conflict"}
 
     if anchor.get("kind") == "mapped_range" and anchor.get("mode") == "bounded_pair":
-        if not _raw_bounded_pair_endpoint_supported(anchor.get("start")) or not _raw_bounded_pair_endpoint_supported(anchor.get("end")):
-            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
-        start_precision = _raw_bounded_pair_precision(anchor.get("start"))
+        start_expr = anchor.get("start")
         end_expr = anchor.get("end")
+        if not _raw_bounded_pair_endpoint_supported(start_expr) or not _raw_bounded_pair_endpoint_supported(end_expr):
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
+        if _raw_shifted_day_cutoff_endpoint(start_expr):
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
+        if _looks_like_zero_day_cutoff_phrase(text) and _raw_day_zero_endpoint(end_expr):
+            return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
+        start_precision = _raw_bounded_pair_precision(start_expr)
         end_precision = start_precision if _raw_current_time_endpoint(end_expr) else _raw_bounded_pair_precision(end_expr)
         if start_precision is not None and end_precision is not None and start_precision != end_precision:
             return {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}
@@ -326,6 +332,22 @@ def _raw_current_time_endpoint(expr: object) -> bool:
     if not isinstance(expr, dict):
         return False
     return expr.get("kind") == "relative_window" and expr.get("grain") in {"day", "hour"} and expr.get("offset_units") == 0
+
+
+def _raw_day_zero_endpoint(expr: object) -> bool:
+    if not isinstance(expr, dict):
+        return False
+    return expr.get("kind") == "relative_window" and expr.get("grain") == "day" and expr.get("offset_units") == 0
+
+
+def _raw_shifted_day_cutoff_endpoint(expr: object) -> bool:
+    if not isinstance(expr, dict):
+        return False
+    return expr.get("kind") == "relative_window" and expr.get("grain") == "day" and int(expr.get("offset_units", 0)) < 0
+
+
+def _looks_like_zero_day_cutoff_phrase(text: str) -> bool:
+    return bool(_ZERO_DAY_CUTOFF_PATTERN.search(text))
 
 
 def _raw_bounded_pair_precision(expr: object) -> str | None:
@@ -358,7 +380,14 @@ def _raw_bounded_pair_endpoint_supported(expr: object) -> bool:
     if kind in {"named_period", "date_range", "datetime_range"}:
         return True
     if kind == "relative_window":
-        return expr.get("grain") in {"day", "hour"} and expr.get("offset_units") == 0
+        offset_units = expr.get("offset_units")
+        if not isinstance(offset_units, int):
+            return False
+        if expr.get("grain") == "day":
+            return offset_units <= 0
+        if expr.get("grain") == "hour":
+            return offset_units == 0
+        return False
     if kind == "enumeration_set":
         members = expr.get("members", [])
         return bool(members) and all(_raw_bounded_pair_endpoint_supported(member) for member in members)

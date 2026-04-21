@@ -123,7 +123,7 @@ def assemble_time_plan(
         stage_b = {key: _parse_stage_b(key, value) for key, value in stage_b_outputs_by_unit.items()}
 
         unit_ids, lookup_by_original = _allocate_unit_ids(stage_a.units)
-        _validate_layer3(stage_a.query, stage_a.units, stage_b)
+        _validate_layer3(stage_a.query, stage_a.units, stage_b, system_datetime=stage_a.system_datetime)
         canonical_stage_b = _canonicalize_stage_b(stage_b)
         units = [
             _assemble_unit(
@@ -276,7 +276,13 @@ def _assemble_comparisons(
     return assembled
 
 
-def _validate_layer3(query: str, units: list[StageAUnitOutput], stage_b: dict[str, StageBOutput]) -> None:
+def _validate_layer3(
+    query: str,
+    units: list[StageAUnitOutput],
+    stage_b: dict[str, StageBOutput],
+    *,
+    system_datetime: datetime,
+) -> None:
     for index, unit in enumerate(units):
         if unit.content_kind == "standalone":
             stage_b_output = stage_b.get(_stage_b_lookup_key(index, unit))
@@ -295,7 +301,12 @@ def _validate_layer3(query: str, units: list[StageAUnitOutput], stage_b: dict[st
                     details="healthy standalone unit requires carrier",
                 )
             if stage_b_output.carrier is not None:
-                _validate_carrier_semantics(unit, stage_b_output.carrier, unit_id=unit.unit_id or f"__index_{index}__")
+                _validate_carrier_semantics(
+                    unit,
+                    stage_b_output.carrier,
+                    unit_id=unit.unit_id or f"__index_{index}__",
+                    system_datetime=system_datetime,
+                )
         elif unit.content_kind == "derived" and not unit.sources:
             raise PostProcessorValidationError(
                 layer=3,
@@ -432,7 +443,13 @@ def _is_bounded_range_endpoint_anchor(anchor: object) -> bool:
     return isinstance(anchor, (NamedPeriod, DateRange, DatetimeRange))
 
 
-def _validate_carrier_semantics(unit: StageAUnitOutput, carrier: Carrier, *, unit_id: str) -> None:
+def _validate_carrier_semantics(
+    unit: StageAUnitOutput,
+    carrier: Carrier,
+    *,
+    unit_id: str,
+    system_datetime: datetime,
+) -> None:
     _validate_non_head_non_day_grain_expansion(carrier, unit_id=unit_id)
     _validate_hour_modifier_topology(carrier, unit_id=unit_id)
     if unit.surface_hint == "calendar_grain_rolling" and _is_calendar_grain_rolling_approximation(carrier):
@@ -473,7 +490,7 @@ def _validate_carrier_semantics(unit: StageAUnitOutput, carrier: Carrier, *, uni
     elif isinstance(anchor, RollingByCalendarUnit):
         _validate_frozen_rolling_by_calendar(anchor, unit_id=unit_id)
     elif isinstance(anchor, MappedRange):
-        _validate_mapped_range_semantics(anchor, unit_id=unit_id)
+        _validate_mapped_range_semantics(anchor, unit_id=unit_id, system_datetime=system_datetime)
 
 
 def _validate_non_head_non_day_grain_expansion(carrier: Carrier, *, unit_id: str) -> None:
@@ -525,7 +542,7 @@ def _validate_hour_modifier_topology(carrier: Carrier, *, unit_id: str) -> None:
             current_grain = modifier.target_grain
 
 
-def _validate_mapped_range_semantics(anchor: MappedRange, *, unit_id: str) -> None:
+def _validate_mapped_range_semantics(anchor: MappedRange, *, unit_id: str, system_datetime: datetime) -> None:
     if anchor.mode != "bounded_pair":
         return
     _validate_bounded_pair_endpoint(anchor.start, unit_id=unit_id, side="start")
@@ -542,6 +559,7 @@ def _validate_mapped_range_semantics(anchor: MappedRange, *, unit_id: str) -> No
             unit_id=unit_id,
             details="mapped_range bounded_pair requires single-precision endpoints; mixed precision is unsupported",
         )
+    _validate_shifted_day_bounded_pair_order(anchor, unit_id=unit_id, system_datetime=system_datetime)
 
 
 def _validate_bounded_pair_endpoint(expr: Any, *, unit_id: str, side: str) -> None:
@@ -558,8 +576,34 @@ def _validate_bounded_pair_endpoint(expr: Any, *, unit_id: str, side: str) -> No
     anchor = _coerce_bounded_pair_endpoint(expr, unit_id=unit_id, side=side)
     if isinstance(anchor, (NamedPeriod, DateRange, DatetimeRange)):
         return
-    if isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0:
-        return
+    if isinstance(anchor, RelativeWindow):
+        if anchor.grain == "day":
+            if anchor.offset_units == 0:
+                return
+            if anchor.offset_units < 0:
+                if side == "start":
+                    raise PostProcessorValidationError(
+                        layer=3,
+                        stage="post_processor",
+                        unit_id=unit_id,
+                        details="mapped_range bounded_pair does not support start relative_window(day,<0) endpoint",
+                    )
+                return
+            raise PostProcessorValidationError(
+                layer=3,
+                stage="post_processor",
+                unit_id=unit_id,
+                details="mapped_range bounded_pair does not support future day-offset endpoints",
+            )
+        if anchor.grain == "hour" and anchor.offset_units == 0:
+            return
+        if anchor.grain == "hour":
+            raise PostProcessorValidationError(
+                layer=3,
+                stage="post_processor",
+                unit_id=unit_id,
+                details="mapped_range bounded_pair only supports current-time hour relative endpoints",
+            )
     if isinstance(anchor, EnumerationSet):
         for member in anchor.members:
             _validate_bounded_pair_endpoint(member, unit_id=unit_id, side=side)
@@ -635,6 +679,34 @@ def _is_current_time_bounded_pair_endpoint(expr: Any) -> bool:
     except PostProcessorValidationError:
         return False
     return isinstance(anchor, RelativeWindow) and anchor.grain in {"day", "hour"} and anchor.offset_units == 0
+
+
+def _is_shifted_day_bounded_pair_endpoint(expr: Any) -> bool:
+    try:
+        anchor = _coerce_bounded_pair_endpoint(expr, unit_id="__system__", side="end")
+    except PostProcessorValidationError:
+        return False
+    return isinstance(anchor, RelativeWindow) and anchor.grain == "day" and anchor.offset_units < 0
+
+
+def _validate_shifted_day_bounded_pair_order(anchor: MappedRange, *, unit_id: str, system_datetime: datetime) -> None:
+    if not _is_shifted_day_bounded_pair_endpoint(anchor.end):
+        return
+    try:
+        materialize_carrier(
+            Carrier(anchor=anchor, modifiers=[]),
+            system_datetime=system_datetime,
+            business_calendar=_load_business_calendar(),
+        )
+    except ValueError as exc:
+        if "semantic_conflict" not in str(exc):
+            raise
+        raise PostProcessorValidationError(
+            layer=3,
+            stage="post_processor",
+            unit_id=unit_id,
+            details=f"semantic_conflict: {exc}",
+        ) from exc
 
 
 def _is_calendar_grain_rolling_approximation(carrier: Carrier) -> bool:

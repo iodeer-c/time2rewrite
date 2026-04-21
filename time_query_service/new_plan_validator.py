@@ -55,7 +55,12 @@ def _validate_semantics(plan: TimePlan) -> None:
                 )
             if unit.content.carrier is not None:
                 _reject_transient_non_day_grain_expansion(unit)
-                _validate_carrier_semantics(SimpleNamespace(surface_hint=None), unit.content.carrier, unit_id=unit.unit_id)
+                _validate_carrier_semantics(
+                    SimpleNamespace(surface_hint=None),
+                    unit.content.carrier,
+                    unit_id=unit.unit_id,
+                    system_datetime=plan.system_datetime,
+                )
         elif not unit.content.sources:
             raise PostProcessorValidationError(
                 layer=3,

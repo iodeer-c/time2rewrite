@@ -51,7 +51,11 @@ _STAGE_B_SYSTEM_PROMPT_TEMPLATE = """
 - 如果 bounded range 两端都是显式日级日期，使用 `date_range`。
 - 如果 bounded range 至少一端是自然周期边界，使用 `mapped_range(mode="bounded_pair")`，`start` 和 `end` 必须直接放 canonical endpoint anchors。
 - 对于右边界缺少年份的 bounded range，必须做最小非倒退补全：先继承左边界年份；如果会倒退，再把右边界滚到下一个最小自然周期。例如 `去年12月到3月` 的右边界必须是 `2026年3月`。
-- `mapped_range(mode="bounded_pair")` 在这期只允许自然周期/日级端点；如果端点涉及 `calendar_event`、rolling 或 calendar-class 语义，必须 degrade 为 `unsupported_anchor_semantics`。
+- `X截止到昨天 / 前天 / 大前天 / N天前 / N日前` 这类显式 day cutoff 也属于 `mapped_range(mode="bounded_pair")`；右端必须输出 `relative_window(grain="day", offset_units=-N)`。
+- `0天前 / 0日前` 不是“至今”的同义词，必须 degrade 为 `unsupported_anchor_semantics`，不能映射成 `offset_units=0`。
+- 本次只支持右端显式 shifted-day cutoff；不要输出 `start = relative_window(grain="day", offset_units<0)`。
+- `X截止到一周前 / 一个月前`、`X截止到3小时前`、`X截止到明天`、`最近一个月截至昨天`、`截至昨天的最近7天` 仍然必须 degrade 为 `unsupported_anchor_semantics`。
+- `mapped_range(mode="bounded_pair")` 在这期只允许自然周期、显式日级端点、当前端点，以及右端 day cutoff；如果端点涉及 `calendar_event`、rolling 或 calendar-class 语义，必须 degrade 为 `unsupported_anchor_semantics`。
 - 如果 bounded range 还带有 grouped / filter scaffold（例如 `2025年1月到3月每个月的每个工作日`），必须先建一个单 bounded-range parent，再把 grouped/filter 语义挂在这个 parent 上；不能先拆成两个端点 carrier。
 - 节假日事件必须使用当前 schema 的英文 canonical key，不能自造拼音 key。当前俗称与 canonical key 的映射如下：
 __CALENDAR_EVENT_ALIAS_CATALOG__
@@ -181,6 +185,66 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
                     "mode": "bounded_pair",
                     "start": {"kind": "named_period", "period_type": "day", "year": 2026, "date": "2026-01-01"},
                     "end": "system_datetime",
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "3月1日截止到昨天", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "day", "year": 2026, "date": "2026-03-01"},
+                    "end": {"kind": "relative_window", "grain": "day", "offset_units": -1},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "3月1日截止到前天", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "day", "year": 2026, "date": "2026-03-01"},
+                    "end": {"kind": "relative_window", "grain": "day", "offset_units": -2},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "3月1日截止到大前天", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "day", "year": 2026, "date": "2026-03-01"},
+                    "end": {"kind": "relative_window", "grain": "day", "offset_units": -3},
+                },
+                "modifiers": [],
+            },
+            "needs_clarification": False,
+        },
+    ),
+    (
+        {"text": "3月1日截止到7天前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"},
+        {
+            "carrier": {
+                "anchor": {
+                    "kind": "mapped_range",
+                    "mode": "bounded_pair",
+                    "start": {"kind": "named_period", "period_type": "day", "year": 2026, "date": "2026-03-01"},
+                    "end": {"kind": "relative_window", "grain": "day", "offset_units": -7},
                 },
                 "modifiers": [],
             },
@@ -501,9 +565,17 @@ _FEW_SHOTS: list[tuple[dict[str, Any], dict[str, Any]]] = [
     ({"text": "上个季度第一个假期", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "最近一个月不含今天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "截至昨天的最近7天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "最近一个月截至昨天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "过去3个完整月", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "去年9月到国庆假期", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "最近一周到上周五", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到一周前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到一个月前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到0天前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到0日前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到3小时前", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "3月1日截止到明天", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
+    ({"text": "前天截止到3月1日", "system_datetime": "2026-04-21T09:30:00", "timezone": "Asia/Shanghai"}, {"carrier": None, "needs_clarification": True, "reason_kind": "unsupported_anchor_semantics"}),
     ({"text": "2025年每天", "system_datetime": "2026-04-17T00:00:00", "timezone": "Asia/Shanghai"}, {"carrier": {"anchor": {"kind": "named_period", "period_type": "year", "year": 2025}, "modifiers": [{"kind": "grain_expansion", "target_grain": "day"}]}, "needs_clarification": False}),
 ]
 
