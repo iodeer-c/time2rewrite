@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from datetime import timezone as _utc_tz
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.clarification_writer import build_clarification_facts, render_clarified_query
@@ -12,6 +15,20 @@ from time_query_service.post_processor import StageAOutput, assemble_time_plan
 from time_query_service.stage_a_planner import run_stage_a
 from time_query_service.stage_b_planner import StageBRequest, run_stage_b_batch
 from time_query_service.new_resolver import resolve_plan
+from time_query_service.time_plan import TimePlan
+
+
+logger = logging.getLogger(__name__)
+NoTimePostProcessor = Callable[[datetime], str | None]
+HookOutcome = Literal[
+    "success",
+    "noop",
+    "error",
+    "invalid_return",
+    "not_triggered",
+    "unreachable_no_rewrite",
+    "unreachable_stage_a_failed",
+]
 
 
 class QueryPipelineService:
@@ -91,12 +108,14 @@ class QueryPipelineService:
         timezone: str = "Asia/Shanghai",
         rewrite: bool = False,
         default_rolling_endpoint: Literal["today", "yesterday"] = "today",
+        no_time_post_processor: NoTimePostProcessor | None = None,
     ) -> dict[str, Any]:
         if self._business_calendar is None:
             raise ValueError("business_calendar is required for the new pipeline")
         if system_datetime is None:
             raise ValueError("system_datetime is required for the new pipeline")
-        _parse_system_datetime_input(system_datetime)
+        request_local_datetime = bind_request_local_datetime(system_datetime, timezone)
+        request_local_datetime_iso = request_local_datetime.isoformat()
 
         pipeline_logging_enabled = self._is_pipeline_logging_enabled()
         log_pipeline_event(
@@ -129,8 +148,15 @@ class QueryPipelineService:
                 "clarification_items": [],
                 "clarified_query": None,
                 "rewritten_query": None,
+                "has_time": False,
+                "request_local_datetime": request_local_datetime_iso,
             }
-            log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)
+            log_pipeline_event(
+                "service",
+                "response",
+                {**response, "hook_outcome": "unreachable_stage_a_failed"},
+                enabled=pipeline_logging_enabled,
+            )
             return response
 
         stage_b_requests = self._stage_b_requests(stage_a)
@@ -169,6 +195,7 @@ class QueryPipelineService:
             [item.model_dump(mode="python") for item in clarification_items],
             enabled=pipeline_logging_enabled,
         )
+        has_time = derive_has_time(time_plan)
         if rewrite:
             clarified_query = render_clarified_query(
                 original_query=query,
@@ -176,9 +203,17 @@ class QueryPipelineService:
                 text_runner=self.rewriter_runner,
             )
             rewritten_query = clarified_query
+            hook_outcome: HookOutcome = "not_triggered"
+            if not has_time and no_time_post_processor is not None:
+                rewritten_query, hook_outcome = _apply_no_time_post_processor(
+                    clarified_query=clarified_query,
+                    request_local_datetime=request_local_datetime,
+                    no_time_post_processor=no_time_post_processor,
+                )
         else:
             clarified_query = None
             rewritten_query = None
+            hook_outcome = "unreachable_no_rewrite"
 
         response = {
             "original_query": query,
@@ -186,8 +221,15 @@ class QueryPipelineService:
             "clarification_items": [item.model_dump(mode="python") for item in clarification_items],
             "clarified_query": clarified_query,
             "rewritten_query": rewritten_query,
+            "has_time": has_time,
+            "request_local_datetime": request_local_datetime_iso,
         }
-        log_pipeline_event("service", "response", response, enabled=pipeline_logging_enabled)
+        log_pipeline_event(
+            "service",
+            "response",
+            {**response, "hook_outcome": hook_outcome},
+            enabled=pipeline_logging_enabled,
+        )
         return response
 
     @staticmethod
@@ -211,3 +253,60 @@ def _parse_system_datetime_input(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
     except ValueError as exc:
         raise ValueError("system_datetime must use YYYY-MM-DDTHH:MM:SS") from exc
+
+
+def bind_request_local_datetime(system_datetime: str, timezone: str) -> datetime:
+    naive = _parse_system_datetime_input(system_datetime)
+
+    tz_name = timezone.strip() if isinstance(timezone, str) else ""
+    if not tz_name:
+        raise ValueError(f"timezone must be a non-empty string: {timezone!r}")
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"unknown timezone: {timezone!r}") from exc
+
+    aware = naive.replace(tzinfo=tz)
+    if aware != aware.astimezone(_utc_tz.utc).astimezone(tz):
+        raise ValueError(
+            f"system_datetime {system_datetime!r} does not exist in timezone "
+            f"{tz_name!r} (local-time gap, e.g. DST spring-forward)"
+        )
+    if aware.replace(fold=0).utcoffset() != aware.replace(fold=1).utcoffset():
+        raise ValueError(
+            f"system_datetime {system_datetime!r} is ambiguous in timezone "
+            f"{tz_name!r} (local-time overlap, e.g. DST fall-back, two possible instants)"
+        )
+    return aware
+
+
+def derive_has_time(time_plan: TimePlan) -> bool:
+    return len(time_plan.units) > 0
+
+
+def _apply_no_time_post_processor(
+    *,
+    clarified_query: str,
+    request_local_datetime: datetime,
+    no_time_post_processor: NoTimePostProcessor,
+) -> tuple[str, HookOutcome]:
+    try:
+        hook_return = no_time_post_processor(request_local_datetime)
+    except Exception as exc:  # noqa: BLE001 - hook failures must degrade to noop
+        logger.warning("no_time_post_processor raised %s: %s", type(exc).__name__, exc)
+        return clarified_query, "error"
+
+    if hook_return is None:
+        return clarified_query, "noop"
+    if not isinstance(hook_return, str):
+        logger.warning(
+            "no_time_post_processor returned non-str: got_type=%s",
+            type(hook_return).__name__,
+        )
+        return clarified_query, "invalid_return"
+
+    text = hook_return.strip()
+    if not text:
+        logger.debug("no_time_post_processor returned blank text")
+        return clarified_query, "noop"
+    return f"{clarified_query}（{text}）", "success"
