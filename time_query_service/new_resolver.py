@@ -5,6 +5,12 @@ from typing import Any
 
 from time_query_service.business_calendar import BusinessCalendarPort
 from time_query_service.carrier_materializer import materialize_carrier
+from time_query_service.comparison_core_projection import (
+    ComparisonCoreDescriptor,
+    ComparisonCoreInvariantError,
+    ResolvedComparisonProjection,
+    project_resolved_comparison_cores,
+)
 from time_query_service.pipeline_logging import log_pipeline_event
 from time_query_service.resolved_plan import (
     ComparisonDegradedReason,
@@ -30,7 +36,6 @@ def resolve_plan(
         raise TypeError("resolve_plan expects TimePlan")
 
     nodes: dict[str, ResolvedNode] = {}
-    units_by_id = {unit.unit_id: unit for unit in plan.units}
     ordered_units = _toposort_units(plan.units)
 
     for unit in ordered_units:
@@ -77,7 +82,7 @@ def resolve_plan(
             enabled=pipeline_logging_enabled,
         )
 
-    comparisons = [_resolve_comparison(comparison, nodes, units_by_id) for comparison in plan.comparisons]
+    comparisons = [_resolve_comparison(comparison, nodes) for comparison in plan.comparisons]
     return ResolvedPlan(nodes=nodes, comparisons=comparisons)
 
 
@@ -172,12 +177,11 @@ def _resolve_derived_unit(unit: Unit, nodes: dict[str, ResolvedNode]) -> Resolve
 def _resolve_comparison(
     comparison: Comparison,
     nodes: dict[str, ResolvedNode],
-    units_by_id: dict[str, Unit],
 ) -> ResolvedComparison:
     return ResolvedComparison(
         comparison_id=comparison.comparison_id,
         pairs=[
-            _resolve_comparison_pair(pair, nodes, units_by_id[pair.subject_unit_id], units_by_id[pair.reference_unit_id])
+            _resolve_comparison_pair(pair, nodes)
             for pair in comparison.pairs
         ],
     )
@@ -186,14 +190,31 @@ def _resolve_comparison(
 def _resolve_comparison_pair(
     pair: ComparisonPair,
     nodes: dict[str, ResolvedNode],
-    subject_unit: Unit,
-    reference_unit: Unit,
 ) -> ResolvedComparisonPair:
     subject_node = nodes[pair.subject_unit_id]
     reference_node = nodes[pair.reference_unit_id]
 
-    subject_degraded = _endpoint_is_degraded(subject_node, pair.expansion.subject_core_index if pair.expansion else None)
-    reference_degraded = _endpoint_is_degraded(reference_node, pair.expansion.reference_core_index if pair.expansion else None)
+    subject_selected_core_index = pair.expansion.subject_core_index if pair.expansion else None
+    reference_selected_core_index = pair.expansion.reference_core_index if pair.expansion else None
+
+    subject_node_degraded = subject_node.needs_clarification or subject_node.tree is None
+    reference_node_degraded = reference_node.needs_clarification or reference_node.tree is None
+
+    subject_projection = None if subject_node_degraded else project_resolved_comparison_cores(subject_node)
+    reference_projection = None if reference_node_degraded else project_resolved_comparison_cores(reference_node)
+
+    if subject_projection is not None:
+        _validate_runtime_selection(subject_projection, subject_selected_core_index, side="subject")
+    if reference_projection is not None:
+        _validate_runtime_selection(reference_projection, reference_selected_core_index, side="reference")
+
+    subject_descriptor = None if subject_projection is None else _select_projection_core(subject_projection, subject_selected_core_index)
+    reference_descriptor = (
+        None if reference_projection is None else _select_projection_core(reference_projection, reference_selected_core_index)
+    )
+
+    subject_degraded = subject_node_degraded or (subject_descriptor.degraded if subject_descriptor is not None else False)
+    reference_degraded = reference_node_degraded or (reference_descriptor.degraded if reference_descriptor is not None else False)
     degraded = subject_degraded or reference_degraded
 
     degraded_reason: ComparisonDegradedReason | None = None
@@ -204,12 +225,8 @@ def _resolve_comparison_pair(
     elif reference_degraded:
         degraded_reason = "reference_needs_clarification"
 
-    subject_interval = None if subject_degraded else _comparison_interval_for_node(
-        subject_node, subject_unit, pair.expansion.subject_core_index if pair.expansion else None
-    )
-    reference_interval = None if reference_degraded else _comparison_interval_for_node(
-        reference_node, reference_unit, pair.expansion.reference_core_index if pair.expansion else None
-    )
+    subject_interval = None if subject_degraded else subject_descriptor.interval
+    reference_interval = None if reference_degraded else reference_descriptor.interval
 
     return ResolvedComparisonPair(
         subject_unit_id=pair.subject_unit_id,
@@ -222,23 +239,33 @@ def _resolve_comparison_pair(
     )
 
 
-def _endpoint_is_degraded(node: ResolvedNode, selected_core_index: int | None) -> bool:
-    if node.needs_clarification:
-        return True
-    if node.tree is None:
-        return True
-    if selected_core_index is not None and node.tree.role == "derived":
-        child = node.tree.children[selected_core_index]
-        return bool(child.labels.degraded) or child.labels.absolute_core_time is None
-    return False
+def _validate_runtime_selection(
+    projection: ResolvedComparisonProjection,
+    selected_core_index: int | None,
+    *,
+    side: str,
+) -> None:
+    if selected_core_index is None:
+        if projection.comparison_cardinality != 1:
+            raise ComparisonCoreInvariantError(
+                f"{side} endpoint with comparison_cardinality={projection.comparison_cardinality} cannot use aggregate core_index=None"
+            )
+        return
+    if projection.comparison_cardinality == 1:
+        raise ComparisonCoreInvariantError(f"{side} single-core endpoint cannot carry selected_core_index={selected_core_index}")
+    if selected_core_index < 0 or selected_core_index >= projection.comparison_cardinality:
+        raise ComparisonCoreInvariantError(
+            f"{side} selected_core_index={selected_core_index} out of range for comparison_cardinality={projection.comparison_cardinality}"
+        )
 
 
-def _comparison_interval_for_node(node: ResolvedNode, unit: Unit, selected_core_index: int | None) -> Interval:
-    if node.tree is None:
-        raise ValueError("Comparison endpoint tree is missing")
-    if selected_core_index is not None:
-        return node.tree.children[selected_core_index].labels.absolute_core_time
-    return node.tree.labels.absolute_core_time
+def _select_projection_core(
+    projection: ResolvedComparisonProjection,
+    selected_core_index: int | None,
+) -> ComparisonCoreDescriptor:
+    if selected_core_index is None:
+        return projection.aggregate_core
+    return projection.ordered_cores[selected_core_index]
 
 
 def _anchor_kind_for_unit(unit: Unit) -> str | None:

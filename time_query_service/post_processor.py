@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 from time_query_service.business_calendar import JsonBusinessCalendar
 from time_query_service.carrier_materializer import materialize_carrier
+from time_query_service.comparison_core_projection import ComparisonCoreInvariantError, project_unit_comparison_cores
 from time_query_service.config import get_business_calendar_root
 from time_query_service.derivation_registry import get_derivation_transform_spec
 from time_query_service.pipeline_logging import log_pipeline_event
@@ -371,7 +372,12 @@ def _validate_layer4(
     }
     _validate_derivation_transforms(units)
     _assert_acyclic(graph)
-    return _expand_comparisons(comparisons, unit_map=unit_map, system_datetime=system_datetime)
+    return _expand_comparisons(
+        comparisons,
+        unit_map=unit_map,
+        system_datetime=system_datetime,
+        business_calendar=_load_business_calendar(),
+    )
 
 
 def _assert_acyclic(graph: dict[str, list[str]]) -> None:
@@ -1000,6 +1006,7 @@ def _expand_comparisons(
     *,
     unit_map: dict[str, Unit],
     system_datetime: datetime,
+    business_calendar: JsonBusinessCalendar,
 ) -> list[Comparison]:
     expanded_comparisons: list[Comparison] = []
     for comparison in comparisons:
@@ -1009,11 +1016,13 @@ def _expand_comparisons(
                 unit_map[pair.subject_unit_id],
                 unit_map=unit_map,
                 system_datetime=system_datetime,
+                business_calendar=business_calendar,
             )
             reference_cardinality = _comparison_endpoint_cardinality(
                 unit_map[pair.reference_unit_id],
                 unit_map=unit_map,
                 system_datetime=system_datetime,
+                business_calendar=business_calendar,
             )
             if subject_cardinality == 1 and reference_cardinality == 1:
                 expanded_pairs.append(pair.model_copy(update={"expansion": None}))
@@ -1057,50 +1066,29 @@ def _comparison_endpoint_cardinality(
     *,
     unit_map: dict[str, Unit],
     system_datetime: datetime,
+    business_calendar: JsonBusinessCalendar,
 ) -> int:
-    if unit.content.content_kind == "derived":
-        if len(unit.content.sources) > 1:
-            return len(unit.content.sources)
-        if not unit.content.sources:
-            return 1
-        return _comparison_endpoint_cardinality(
-            unit_map[unit.content.sources[0].source_unit_id],
+    try:
+        return project_unit_comparison_cores(
+            unit,
             unit_map=unit_map,
             system_datetime=system_datetime,
-        )
-
-    carrier = unit.content.carrier
-    if carrier is None:
-        return 1
-    anchor = carrier.anchor
-    if isinstance(anchor, RollingByCalendarUnit):
-        return 1
-    if anchor.kind in {"named_period", "date_range", "datetime_range", "relative_window", "rolling_window", "calendar_event"}:
-        return 1
-    if isinstance(anchor, (EnumerationSet, GroupedTemporalValue, MappedRange)):
-        selection = next((modifier for modifier in carrier.modifiers if isinstance(modifier, MemberSelection)), None)
-        base_cardinality = _explicit_sibling_cardinality(carrier, system_datetime=system_datetime)
-        if selection is None:
-            return max(base_cardinality, 1)
-        if selection.selector in {"first", "last", "nth"}:
-            return 1
-        if selection.n is None:
-            return base_cardinality
-        return min(selection.n, base_cardinality)
-    return 1
-
-
-def _explicit_sibling_cardinality(carrier: Carrier, *, system_datetime: datetime) -> int:
-    if isinstance(carrier.anchor, EnumerationSet):
-        return len(carrier.anchor.members)
-    stripped_modifiers = [modifier for modifier in carrier.modifiers if not isinstance(modifier, MemberSelection)]
-    tree = materialize_carrier(
-        Carrier(anchor=carrier.anchor, modifiers=stripped_modifiers),
-        system_datetime=system_datetime,
-        business_calendar=_load_business_calendar(),
-    )
-    return len(tree.children) if tree.children else len(tree.intervals)
-
+            business_calendar=business_calendar,
+        ).comparison_cardinality
+    except ComparisonCoreInvariantError as exc:
+        raise PostProcessorValidationError(
+            layer=4,
+            stage="post_processor",
+            unit_id=unit.unit_id,
+            details=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise PostProcessorValidationError(
+            layer=4,
+            stage="post_processor",
+            unit_id=unit.unit_id,
+            details=str(exc),
+        ) from exc
 
 @lru_cache(maxsize=1)
 def _load_business_calendar() -> JsonBusinessCalendar:
