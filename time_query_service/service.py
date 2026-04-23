@@ -8,7 +8,8 @@ from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from time_query_service.business_calendar import BusinessCalendarPort
-from time_query_service.clarification_writer import build_clarification_facts, render_clarified_query
+from time_query_service.clarification_artifacts import build_clarification_artifacts
+from time_query_service.clarification_writer import render_clarified_query_from_artifacts
 from time_query_service.llm import LLMFactory, LLMRuntimeConfig, load_llm_runtime_config
 from time_query_service.pipeline_logging import log_pipeline_event
 from time_query_service.post_processor import StageAOutput, assemble_time_plan
@@ -184,11 +185,12 @@ class QueryPipelineService:
             pipeline_logging_enabled=pipeline_logging_enabled,
         )
 
-        clarification_items = build_clarification_facts(
+        clarification_artifacts = build_clarification_artifacts(
             original_query=query,
             time_plan=time_plan,
             resolved_plan=resolved_plan,
         )
+        clarification_items = [artifact.fact for artifact in clarification_artifacts]
         log_pipeline_event(
             "service",
             "clarification_facts",
@@ -197,9 +199,9 @@ class QueryPipelineService:
         )
         has_time = derive_has_time(time_plan)
         if rewrite:
-            clarified_query = render_clarified_query(
+            clarified_query = render_clarified_query_from_artifacts(
                 original_query=query,
-                clarification_facts=clarification_items,
+                clarification_artifacts=clarification_artifacts,
                 text_runner=self.rewriter_runner,
             )
             rewritten_query = clarified_query

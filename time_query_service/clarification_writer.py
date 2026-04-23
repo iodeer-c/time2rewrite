@@ -4,29 +4,18 @@ from datetime import date, datetime
 from typing import Any, Literal
 import re
 
-from pydantic import Field
-
-from time_query_service.clarification_writer_prompt import build_clarification_writer_messages
+from time_query_service.clarification_artifacts import build_clarification_artifacts
+from time_query_service.clarification_models import ClarificationArtifact, ClarificationFact
+from time_query_service.clarification_writer_prompt import (
+    build_clarification_writer_messages,
+    build_clarification_writer_messages_from_artifacts,
+)
 from time_query_service.resolved_plan import Interval, IntervalTree, ResolvedPlan
 from time_query_service.tree_ops import display_precision
-from time_query_service.time_plan import CalendarFilter, GrainExpansion, GroupedTemporalValue, HolidayEventCollection, NamedPeriod, RollingByCalendarUnit, StandaloneContent, StrictModel, TimePlan
+from time_query_service.time_plan import CalendarFilter, GrainExpansion, GroupedTemporalValue, HolidayEventCollection, NamedPeriod, RollingByCalendarUnit, StandaloneContent, TimePlan
 
 
-ClarificationStatus = Literal["resolved", "unresolved"]
 MAX_INLINE_FILTERED_MEMBER_COUNT = 31
-
-
-class ClarificationFact(StrictModel):
-    unit_id: str
-    label: str
-    status: ClarificationStatus
-    resolved_text: str | None = None
-    detail_text: str | None = None
-    grouping_grain: str | None = None
-    precision: Literal["day", "hour"] | None = None
-    reason_kind: str | None = None
-    derived_from: list[str] = Field(default_factory=list)
-    comparison_peers: list[str] = Field(default_factory=list)
 
 
 def build_clarification_facts(
@@ -35,39 +24,12 @@ def build_clarification_facts(
     time_plan: TimePlan,
     resolved_plan: ResolvedPlan,
 ) -> list[ClarificationFact]:
-    comparison_peers = _comparison_peer_map(resolved_plan)
-    facts: list[ClarificationFact] = []
-    for unit in time_plan.units:
-        node = resolved_plan.nodes.get(unit.unit_id)
-        grouping_grain = _grouping_grain_for_unit(unit)
-        precision = _precision_for_unit(unit, node.tree if node and node.tree is not None else None)
-        if node is None or node.needs_clarification or node.tree is None or node.tree.labels.absolute_core_time is None:
-            facts.append(
-                ClarificationFact(
-                    unit_id=unit.unit_id,
-                    label=unit.render_text,
-                    status="unresolved",
-                    grouping_grain=grouping_grain,
-                    precision=precision,
-                    reason_kind=None if node is None else node.reason_kind,
-                    derived_from=[] if node is None or node.derived_from is None else list(node.derived_from),
-                    comparison_peers=comparison_peers.get(unit.unit_id, []),
-                )
-            )
-            continue
-        facts.append(
-                ClarificationFact(
-                    unit_id=unit.unit_id,
-                    label=unit.render_text,
-                    status="resolved",
-                    resolved_text=_format_interval(node.tree.labels.absolute_core_time, precision=precision or "day"),
-                    detail_text=_detail_text_for_unit(unit, node.tree, grouping_grain),
-                    grouping_grain=grouping_grain,
-                    precision=precision,
-                    derived_from=[] if node.derived_from is None else list(node.derived_from),
-                    comparison_peers=comparison_peers.get(unit.unit_id, []),
-                )
-            )
+    artifacts = build_clarification_artifacts(
+        original_query=original_query,
+        time_plan=time_plan,
+        resolved_plan=resolved_plan,
+    )
+    facts = [artifact.fact for artifact in artifacts]
     return _coalesce_split_range_facts(
         original_query=original_query,
         time_plan=time_plan,
@@ -111,6 +73,41 @@ def render_clarified_query(
     return rendered
 
 
+def render_clarified_query_from_artifacts(
+    *,
+    original_query: str,
+    clarification_artifacts: list[ClarificationArtifact],
+    text_runner: Any | None = None,
+) -> str:
+    if not clarification_artifacts:
+        return original_query
+    deterministic = _render_deterministically_from_artifacts(
+        original_query=original_query,
+        clarification_artifacts=clarification_artifacts,
+    )
+    if text_runner is None or not _requires_llm_writer_for_artifacts(clarification_artifacts):
+        return deterministic
+    response = text_runner.invoke(
+        build_clarification_writer_messages_from_artifacts(
+            original_query=original_query,
+            clarification_artifacts=clarification_artifacts,
+        )
+    )
+    content = response.content if hasattr(response, "content") else response
+    if not isinstance(content, str):
+        return deterministic
+    rendered = content.strip()
+    if not rendered:
+        return deterministic
+    if not validate_clarified_query_from_artifacts(
+        original_query=original_query,
+        clarification_artifacts=clarification_artifacts,
+        clarified_query=rendered,
+    ):
+        return deterministic
+    return rendered
+
+
 def _render_deterministically(
     *,
     original_query: str,
@@ -133,6 +130,33 @@ def _render_fact(fact: ClarificationFact) -> str:
             return f"{fact.label}指{fact.resolved_text}，{fact.detail_text}"
         return f"{fact.label}指{fact.resolved_text}"
     return f"{fact.label}当前无法确定"
+
+
+def _render_deterministically_from_artifacts(
+    *,
+    original_query: str,
+    clarification_artifacts: list[ClarificationArtifact],
+) -> str:
+    parts = [_render_clause(artifact) for artifact in clarification_artifacts]
+    return f"{original_query}（{'；'.join(parts)}）"
+
+
+def _render_clause(artifact: ClarificationArtifact) -> str:
+    clause = artifact.clause
+    if clause.family == "scalar":
+        if clause.detail_text is not None:
+            return f"{clause.label}指{clause.resolved_text}，{clause.detail_text}"
+        return f"{clause.label}指{clause.resolved_text}"
+    if clause.family == "collection":
+        return f"{clause.label}指{clause.resolved_text}{clause.detail_text}"
+    if clause.family == "selected_continuous":
+        return (
+            f"{clause.label}指{clause.source_scope_text}范围内选出的{clause.member_term}，"
+            f"结果范围为{clause.resolved_text}，{clause.member_summary_text}"
+        )
+    if clause.family == "selected_discrete":
+        return f"{clause.label}指选出的{clause.member_term}，结果范围为{clause.resolved_text}，{clause.member_summary_text}"
+    return f"{clause.label}当前无法确定"
 
 
 def _format_interval(interval: Interval, *, precision: Literal["day", "hour"]) -> str:
@@ -278,6 +302,12 @@ def _requires_llm_writer(clarification_facts: list[ClarificationFact]) -> bool:
     )
 
 
+def _requires_llm_writer_for_artifacts(clarification_artifacts: list[ClarificationArtifact]) -> bool:
+    return len(clarification_artifacts) > 1 or any(
+        artifact.fact.derived_from or artifact.fact.comparison_peers for artifact in clarification_artifacts
+    )
+
+
 def _is_valid_clarified_query(
     *,
     original_query: str,
@@ -298,6 +328,74 @@ def _is_valid_clarified_query(
             if "无法确定" not in clarified_query:
                 return False
     return True
+
+
+def validate_clarified_query_from_artifacts(
+    *,
+    original_query: str,
+    clarification_artifacts: list[ClarificationArtifact],
+    clarified_query: str,
+) -> bool:
+    if not clarified_query.startswith(original_query):
+        return False
+    return all(_validate_clause(artifact, clarified_query) for artifact in clarification_artifacts)
+
+
+def _validate_clause(artifact: ClarificationArtifact, clarified_query: str) -> bool:
+    clause = artifact.clause
+    semantics = artifact.semantics
+    if clause.label not in clarified_query:
+        return False
+
+    if clause.family == "unresolved":
+        return f"{clause.label}当前无法确定" in clarified_query and "无符合条件的" not in clarified_query
+
+    if clause.family == "scalar":
+        prefix_variants = (
+            f"{clause.label}指{clause.resolved_text}",
+            f"{clause.label}为{clause.resolved_text}",
+        )
+        if not any(prefix in clarified_query for prefix in prefix_variants):
+            return False
+        return clause.detail_text is None or clause.detail_text in clarified_query
+
+    if clause.family == "collection":
+        if f"{clause.label}指{clause.resolved_text}{clause.detail_text}" not in clarified_query:
+            return False
+        if f"{clause.label}指{clause.resolved_text}，" in clarified_query:
+            return False
+        if semantics.no_match:
+            return "无符合条件的" in clarified_query and f"{clause.label}当前无法确定" not in clarified_query
+        return True
+
+    if clause.family == "selected_continuous":
+        prefix = f"{clause.label}指{clause.source_scope_text}范围内选出的{clause.member_term}"
+        result_phrase = f"结果范围为{clause.resolved_text}"
+        if prefix not in clarified_query or result_phrase not in clarified_query:
+            return False
+        if clarified_query.find(prefix) > clarified_query.find(result_phrase):
+            return False
+        if clause.member_summary_text not in clarified_query:
+            return False
+        if semantics.no_match:
+            return "无符合条件的" in clarified_query and f"{clause.label}当前无法确定" not in clarified_query
+        return True
+
+    if clause.family == "selected_discrete":
+        prefix = f"{clause.label}指选出的{clause.member_term}"
+        result_phrase = f"结果范围为{clause.resolved_text}"
+        if prefix not in clarified_query or result_phrase not in clarified_query:
+            return False
+        if clause.member_summary_text not in clarified_query:
+            return False
+        invalid_continuous = f"{clause.label}指{clause.resolved_text}范围内选出的"
+        if invalid_continuous in clarified_query:
+            return False
+        if semantics.no_match:
+            return "无符合条件的" in clarified_query and f"{clause.label}当前无法确定" not in clarified_query
+        return True
+
+    return False
 
 
 def _detail_text_for_unit(unit, tree: IntervalTree, grouping_grain: str | None) -> str | None:
